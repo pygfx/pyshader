@@ -1,3 +1,7 @@
+"""
+Implements the base class for generating SpirV code.
+"""
+
 import io
 import struct
 
@@ -190,7 +194,7 @@ class BaseSpirVGenerator:
         disp("MagicNumber: ", hex(cc.MagicNumber))
         disp("Version: ", hex(cc.Version))
         disp("VendorId: ", hex(0))
-        disp("Bounds: ", len(self._id))
+        disp("Bounds: ", len(self._ids))
         disp("Reserved: ", hex(0))
 
         types = set()

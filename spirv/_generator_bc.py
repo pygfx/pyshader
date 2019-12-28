@@ -1,3 +1,7 @@
+"""
+Implements generating SpirV code from our bytecode.
+"""
+
 import struct
 
 from ._generator_base import IdInt, BaseSpirVGenerator

@@ -5,7 +5,7 @@ import subprocess
 from ._module import SpirVModule
 
 
-def glsl2spirv(glsl_code):
+def glsl2spirv(glsl_code, shader_type):
     """ Compile GLSL to SPirV and return as a SpirVModule object.
 
     Needs Spir-V tools, which can easily be obtained by installing the
@@ -13,10 +13,12 @@ def glsl2spirv(glsl_code):
     use bytes2spirv() or file2spirv() instead.
     """
 
+    if shader_type not in ("vert", "frag", "comp"):
+        raise ValueError(f"Shadertype must be 'vert', 'frag' or 'comp', not {shader_type!r}.")
     if not isinstance(glsl_code, str):
         raise TypeError("glsl2spirv expects a string.")
 
-    filename1 = os.path.join(tempfile.gettempdir(), "x.glsl")
+    filename1 = os.path.join(tempfile.gettempdir(), f"x.{shader_type}")
     filename2 = os.path.join(tempfile.gettempdir(), "x.spv")
 
     with open(filename1, "wb") as f:

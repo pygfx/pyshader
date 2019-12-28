@@ -1,3 +1,9 @@
+"""
+WASL is an experimental custom textual shading language.
+It's currently in a broken state. It's probably better
+to support WSL than roll our own shading language. This was fun though :)
+"""
+
 from textx import metamodel_from_str
 
 from ._module import SpirVModule

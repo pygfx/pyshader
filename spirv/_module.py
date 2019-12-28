@@ -49,7 +49,8 @@ class SpirVModule:
             return stdout.decode()
 
     def validate(self):
-        """ Validate the generated binary code by running spirv-val.
+        """ Validate the generated binary code by running spirv-val. Raises an
+        errror if the SpirV was found to be invalid.
 
         Needs Spir-V tools, which can easily be obtained by installing the Vulkan SDK.
         But you probably don't want to call this in end-user code.
