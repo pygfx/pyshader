@@ -4,7 +4,7 @@ Tools to work with SpirV in Python, including a Python to SpirV compiler.
 
 # flake8: noqa
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 from ._module import SpirVModule
