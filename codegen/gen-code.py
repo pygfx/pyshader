@@ -1,5 +1,6 @@
 import subprocess
 
+
 def blacken(src, ll=88):
     p = subprocess.Popen(
         ["black", "-l", str(ll), "-"],

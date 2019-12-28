@@ -17,6 +17,7 @@ def vertex_shader(input, output):
     output.pos = vec4(p, 0.0, 1.0)
     output.color = vec3(p, 0.5)
 
+
 # You can uncomment these, but they need spirv-tools to be installed
 # vertex_shader.validate()
 # vertex_shader.disassble()

@@ -33,13 +33,15 @@ def _create_type(name, base, props):
 class SpirVType:
     """ The root base class of all SpirV types.
     """
+
     is_abstract = True
 
     def __init__(self):
         if self.is_abstract:
             name = self.__class__.__name__
-            raise RuntimeError(f"{name} is an abstract class and cannot be instantiated")
-
+            raise RuntimeError(
+                f"{name} is an abstract class and cannot be instantiated"
+            )
 
 
 class Scalar(SpirVType):
@@ -72,7 +74,6 @@ class Aggregate(Composite):
     """
 
 
-
 class Vector(Composite):
     """ Base class for Vector types. Concrete types are templated based on
     length and subtype.
@@ -84,7 +85,9 @@ class Vector(Composite):
     def __new__(cls, *args):
         if cls.is_abstract:
             if len(args) != 2:
-                raise TypeError("Vector specialization needs 2 args: Vector(n, subtype)")
+                raise TypeError(
+                    "Vector specialization needs 2 args: Vector(n, subtype)"
+                )
             n, subtype = args
             n = int(n)
             if not isinstance(subtype, type) and issubclass(subtype, Scalar):
@@ -114,7 +117,9 @@ class Matrix(Composite):
     def __new__(cls, *args):
         if cls.is_abstract:
             if len(args) != 3:
-                raise TypeError("Matrix specialization needs 3 args: Matrix(cols, rows, subtype)")
+                raise TypeError(
+                    "Matrix specialization needs 3 args: Matrix(cols, rows, subtype)"
+                )
             cols, rows, subtype = args
             cols, rows = int(cols), int(rows)
             if not isinstance(subtype, type) and issubclass(subtype, Float):

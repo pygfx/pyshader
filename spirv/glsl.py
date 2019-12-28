@@ -14,7 +14,9 @@ def glsl2spirv(glsl_code, shader_type):
     """
 
     if shader_type not in ("vert", "frag", "comp"):
-        raise ValueError(f"Shadertype must be 'vert', 'frag' or 'comp', not {shader_type!r}.")
+        raise ValueError(
+            f"Shadertype must be 'vert', 'frag' or 'comp', not {shader_type!r}."
+        )
     if not isinstance(glsl_code, str):
         raise TypeError("glsl2spirv expects a string.")
 

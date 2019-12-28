@@ -12,7 +12,7 @@ import inspect
 from bytecode_vs_ast2 import bar
 
 
-def foo(a:int, x) -> float:
+def foo(a: int, x) -> float:
     b = a + 1
     print(b)
     return b * 3

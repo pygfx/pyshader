@@ -35,7 +35,9 @@ def x():
     vec3 = vec(float, float, float)
 
     # ouch!
-    mat4 = mat(vec(float, float, float), vec(float, float, float), vec(float, float, float))
+    mat4 = mat(
+        vec(float, float, float), vec(float, float, float), vec(float, float, float)
+    )
 
     # P--- redefined only
     v2 = vec2(2.1, 3.2, 4.5)
@@ -53,14 +55,13 @@ def x():
 # can use class or instance attributes for io
 # can put vertex and fragment shader on single class?
 
-class SomeVertexShader:
 
+class SomeVertexShader:
     def myhelper(foo: vec3, bar: int):
         return foo * float(bar)  # type derived by tracing
 
 
 class MyVertexShader(SomeVertexShader):
-
     def main(self):
 
         aPos = self.input[0, vec3]
@@ -95,6 +96,7 @@ def main(input, output, uniform):  # can add more args here if needed
 
 # %% function style, calling into io
 
+
 def main(input, output, uniform):  # can add more args here if needed
 
     # This is also ok
@@ -114,6 +116,7 @@ def main(input, output, uniform):  # can add more args here if needed
 
 # %% function style, using a define call
 
+
 def main(input, output):
 
     input.define("pos", vec3, 0)
@@ -128,19 +131,18 @@ def main(input, output):
 # Not too bad, really. Is close to how you think it would work.
 # The types must actually exist (be imported). Good thing or bad thing, not sure.
 
+
 class spv:
     def input(location, type):
         return ("input", location, type)
+
     def output(location, type):
         return ("output", location, type)
 
 
-def mainx(aPos: spv.input(0, vec3),
-          vPos: spv.output("glPosition", vec4),
-):
+def mainx(aPos: spv.input(0, vec3), vPos: spv.output("glPosition", vec4)):
 
     vPos = aPos
-
 
 
 # %% Same, but using decorator
@@ -149,9 +151,8 @@ def mainx(aPos: spv.input(0, vec3),
 def myshader():
 
     foo = vec(2.0, 1.0, 0.0)
-    bar = ins[0, vec3] # what type???
+    bar = ins[0, vec3]  # what type???
     out[1] = foo
-
 
 
 # %% function style, using imports
@@ -169,8 +170,8 @@ def main():
 
 # Dito
 
+
 def main():
 
     with spv.imports:
         foo = vec3
-

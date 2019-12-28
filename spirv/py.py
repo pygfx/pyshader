@@ -260,7 +260,7 @@ class PyBytecode2Bytecode:
         func_define, what = func
 
         pargs = args[:n_pargs]
-        kwargs = {kwarg_names[i]: args[i+n_pargs] for i in range(n_kwargs)}
+        kwargs = {kwarg_names[i]: args[i + n_pargs] for i in range(n_kwargs)}
         func_define(what, *pargs, **kwargs)
         self._stack.append(None)
 

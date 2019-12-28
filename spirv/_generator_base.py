@@ -85,7 +85,10 @@ class BaseSpirVGenerator:
         # Define execution modes for each entry point
         if execution_model == cc.ExecutionModel_Fragment:
             self.gen_instruction(
-            "execution_modes", cc.OpExecutionMode, self._entry_point_id, cc.ExecutionMode_OriginLowerLeft
+                "execution_modes",
+                cc.OpExecutionMode,
+                self._entry_point_id,
+                cc.ExecutionMode_OriginLowerLeft,
             )
 
         # Do the thing!
@@ -382,9 +385,7 @@ class BaseSpirVGenerator:
         elif issubclass(the_type, _types.Struct):
             type_id = self.create_id(the_type)
             subtype_ids = [self.get_type_id(subtype) for subtype in the_type.subtypes]
-            self.gen_instruction(
-                "types", cc.OpTypeStruct, type_id, *subtype_ids
-            )
+            self.gen_instruction("types", cc.OpTypeStruct, type_id, *subtype_ids)
         else:
             raise NotImplementedError(the_type)
 

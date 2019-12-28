@@ -1,7 +1,7 @@
 import dis
 
 
-def foo(a:int, x):
+def foo(a: int, x):
     b = a + 1
     print(b)
     a = vec3(1, 2, 3)
@@ -42,6 +42,7 @@ def parse(func):
     #     if addr > A:
     #         return lineno
     #     lineno += line_incr
+
 
 parse(foo)
 print(dis.dis(foo))

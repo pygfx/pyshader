@@ -89,7 +89,7 @@ class Bytecode2SpirVGenerator(BaseSpirVGenerator):
     def _setup_io_variable(self, kind, location, name_type_pairs):
 
         n_names = len(name_type_pairs) / 2
-        singleton_mode = n_names ==1 and kind != "uniform"
+        singleton_mode = n_names == 1 and kind != "uniform"
 
         # Triage over input kind
         if kind == "input":
@@ -106,14 +106,16 @@ class Bytecode2SpirVGenerator(BaseSpirVGenerator):
             # Singleton (not allowed for Uniform)
             name, type_str = name_type_pairs
             var_type = _types.spirv_types_map[type_str]
-            var_id, var_type_id = self.create_object(var_type)  # todo: or f"{kind}.{name}"
+            var_id, var_type_id = self.create_object(
+                var_type
+            )  # todo: or f"{kind}.{name}"
         else:
             # todo: TBH I am not sure if this is allowed for non-uniforms :D
             assert kind == "uniform", f"euhm, I dont know if you can use block {kind}s"
             # Block - the variable is a struct
             subtypes = {}
             for i in range(0, len(name_type_pairs), 2):
-                key, subtype_str = name_type_pairs[i], name_type_pairs[i+1]
+                key, subtype_str = name_type_pairs[i], name_type_pairs[i + 1]
                 subtypes[key] = _types.spirv_types_map[subtype_str]
             var_type = _types.Struct(**subtypes)
             var_id, var_type_id = self.create_object(var_type)
@@ -160,7 +162,11 @@ class Bytecode2SpirVGenerator(BaseSpirVGenerator):
                 index_id, index_type_id = self.create_object(_types.i32)
                 # todo: can re-use constants!
                 self.gen_instruction(
-                    "types", cc.OpConstant, index_type_id, index_id, struct.pack("<i", i)
+                    "types",
+                    cc.OpConstant,
+                    index_type_id,
+                    index_id,
+                    struct.pack("<i", i),
                 )
                 if subname in iodict:
                     raise NameError(f"{kind} {subname} already exists")
@@ -175,7 +181,9 @@ class Bytecode2SpirVGenerator(BaseSpirVGenerator):
             if len(io_args) == 4:
                 type, pointer_id, var_id, index_id = io_args
                 temp_id = self.create_id("struct-field")
-                self.gen_func_instruction(cc.OpAccessChain, pointer_id, temp_id, var_id, index_id)
+                self.gen_func_instruction(
+                    cc.OpAccessChain, pointer_id, temp_id, var_id, index_id
+                )
                 id, type_id = self.create_object(type)
                 self.gen_func_instruction(cc.OpLoad, type_id, id, temp_id)
             else:
@@ -186,7 +194,9 @@ class Bytecode2SpirVGenerator(BaseSpirVGenerator):
         elif name in self._uniform:
             type, pointer_id, var_id, index_id = self._uniform[name]
             temp_id = self.create_id("struct-field")
-            self.gen_func_instruction(cc.OpAccessChain, pointer_id, temp_id, var_id, index_id)
+            self.gen_func_instruction(
+                cc.OpAccessChain, pointer_id, temp_id, var_id, index_id
+            )
             id, type_id = self.create_object(type)
             self.gen_func_instruction(cc.OpLoad, type_id, id, temp_id)
             ob = id
@@ -231,7 +241,9 @@ class Bytecode2SpirVGenerator(BaseSpirVGenerator):
                 type, pointer_id, var_id, index_id = io_args
                 # type_id = self.get_type_id(type)
                 id = self.create_id("struct-field")
-                self.gen_func_instruction(cc.OpAccessChain, pointer_id, id, var_id, index_id)
+                self.gen_func_instruction(
+                    cc.OpAccessChain, pointer_id, id, var_id, index_id
+                )
                 self.gen_func_instruction(cc.OpStore, id, ob)
             else:  # Simple
                 type, pointer_id = io_args  # pointer is a Variable
