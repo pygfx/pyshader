@@ -1,39 +1,39 @@
-import spirv
-import spirv.glsl
-
-from pytest import raises
+import python_shader
 
 
 def test_api():
-    assert isinstance(spirv.__version__, str)
-    assert isinstance(spirv.SpirVModule, type)
+    assert isinstance(python_shader.__version__, str)
+    assert isinstance(python_shader.ShaderModule, type)
 
-    assert callable(spirv.python2spirv)
+    assert callable(python_shader.python2shader)
     for name in "f32 i32 vec2 vec3 vec4 ivec2 ivec3 ivec4".split():
-        assert hasattr(spirv, name)
+        assert hasattr(python_shader, name)
     for name in "mat2 mat3 mat4".split():
-        assert hasattr(spirv, name)
+        assert hasattr(python_shader, name)
 
 
-def test_spirv_module_class():
+def test_shader_module_class():
 
-    SpirVModule = spirv.SpirVModule
-    m = SpirVModule(42, b"aa", "stub")
+    # Create shader module object
+    ShaderModule = python_shader.ShaderModule
+    entrypoint = ("CO_ENTRYPOINT", ("main", "vertex", []))
+    m = ShaderModule(42, [entrypoint], "stub")
+
+    # Validate some stuff
     assert m.input == 42
-    assert m.to_bytes() == b"aa"
+    assert m.to_bytecode()[0] is entrypoint
     assert "stub" in repr(m)
+    assert m.description in repr(m)
 
-    # This module is not valid at all
-    with raises(Exception):
-        m.validate()
-    with raises(Exception):
-        m.disassble()
+    # Generate spirv
+    bb = m.to_spirv()
+    assert isinstance(bb, bytes)
 
 
 def test_spirv_constants():
-    cc = spirv._spirv_constants
+    cc = python_shader._spirv_constants
     assert cc.AccessQualifier_ReadWrite
     assert cc.WordCountShift
     assert isinstance(repr(cc.Version), str)
-    assert isinstance(int(cc.Version), int)
-    assert str(int(cc.Version)) == str(cc.Version)
+    assert int(cc.Version) == cc.Version
+    # assert str(int(cc.Version)) == str(cc.Version)  # not on Python 3.8 :)
