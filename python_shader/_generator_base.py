@@ -9,6 +9,7 @@ from . import _spirv_constants as cc
 from . import _types
 
 # todo: add debug info, most notably line numbers, but can also do source code and object names!
+# todo: SpirV supports specialization: setting constants at runtime, can be useful?
 
 
 # Storage class members, used in OpTypePointer, OpTypeForwardPointer, Opvariable, OpGenericCastToPtrExplicit
@@ -23,6 +24,7 @@ STORAGE_CLASSES = dict(
 
 
 def str_to_words(s):
+    # In SpirV, words are 32bit. Op counting is per word, not per immediate or per byte.
     b = s.encode()
     padding = 4 - (len(b) % 4)  # 4, 3, 2 or 1 -> always at least 1 for 0-termination
     b += padding * b"\x00"
@@ -129,6 +131,8 @@ class BaseSpirVGenerator:
         self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_ImageBasic)
 
         # Move OpVariable to the start of a function
+        # Variables are used to refer to either internal variables, or IO, and load/store
+        # is used to move variables from/to the stack.
         func_instructions = self._sections["functions"]
         insert_point = -1
         for i in range(len(func_instructions)):
