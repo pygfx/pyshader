@@ -1,27 +1,37 @@
-import re
-
 from setuptools import find_packages, setup
 
 
-with open("python_shader/__init__.py") as fh:
-    VERSION = re.search(r"__version__ = \"(.*?)\"", fh.read()).group(1)
+def get_version_and_docstring():
+    ns = {"__doc__": "", "__version__": ""}
+    docStatus = 0  # Not started, in progress, done
+    for line in open("python_shader/__init__.py").readlines():
+        if line.startswith("__version__"):
+            exec(line.strip(), ns, ns)
+        elif line.startswith('"""'):
+            if docStatus == 0:
+                docStatus = 1
+                line = line.lstrip('"')
+            elif docStatus == 1:
+                docStatus = 2
+        if docStatus == 1:
+            ns["__doc__"] += line.rstrip() + "\n"
+    return ns["__version__"], ns["__doc__"]
 
-description = "Write modern GPU shaders in Python!"
-url = "https://github.com/almarklein/python-shader"
+
+version, doc = get_version_and_docstring()
+
 
 setup(
     name="python-shader",
-    version=VERSION,
-    description=description,
-    packages=find_packages(exclude=["tests", "tests.*", "examples", "examples.*"]),
-    python_requires=">=3.6.0",
-    license=open("LICENSE").read(),
-    # long_description=open("README.md").read(),
-    long_description=description + "\n\n" + url,
+    version=version,
+    url="https://github.com/almarklein/python-shader",
+    description="Write modern GPU shaders in Python!",
+    long_description=doc,
     long_description_content_type="text/markdown",
     author="Almar Klein",
     author_email="almar.klein@gmail.com",
-    url=url,
+    packages=find_packages(exclude=["tests", "tests.*", "examples", "examples.*"]),
+    python_requires=">=3.6.0",
     zip_safe=True,
     classifiers=[
         "Development Status :: 3 - Alpha",
