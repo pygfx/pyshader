@@ -20,7 +20,6 @@ def get_version_and_docstring():
 
 version, doc = get_version_and_docstring()
 
-
 setup(
     name="python-shader",
     version=version,
