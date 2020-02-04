@@ -191,6 +191,7 @@ class BaseSpirVGenerator:
         self._ids = {0: None}  # maps id -> info. For objects, info is a type in _types
         self._constants = {}
         self._type_name_to_id = {}
+        self._capabilities = set()
         self.scope_stack = []  # stack of dicts: name -> id, type, type_id
         # todo: can we do without a stack, pass everything into funcs?
 
@@ -239,15 +240,10 @@ class BaseSpirVGenerator:
             cc.MemoryModel_Simple,
         )
 
-        # Define capabilities. Therea area lot more, and we probably should detect
-        # todo: detect capabilities from SpirV stuff being used
-        # the cases when we need to define them, and/or let the user define them somehow.
-        self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_Matrix)
+        # Define capabilities. We "collect" these as certain features are used.
         self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_Shader)
-        # self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_Geometry)
-        # self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_Float16)
-        # self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_Float64)
-        self.gen_instruction("capabilities", cc.OpCapability, cc.Capability_ImageBasic)
+        for capability_op in sorted(self._capabilities):
+            self.gen_instruction("capabilities", cc.OpCapability, capability_op)
 
         # Move OpVariable to the start of a function
         # Variables are used to refer to either internal variables, or IO, and load/store
@@ -393,17 +389,22 @@ class BaseSpirVGenerator:
         return value_id, type_id
         # todo: return only value, and support value.type_id?
 
-    def obtain_constant(self, value):
+    def obtain_constant(self, value, the_type=None):
         """ Get the id object for the constant of given value.
         Existing constants are re-used.
         """
         # First derive SpirV type from value
         if isinstance(value, float):
-            the_type = _types.f32
-            bb = struct.pack("<f", value)
+            the_type = _types.f32 if the_type is None else the_type
+            assert the_type.__name__ != "f16", "Cannot yet create f16 constants."
+            M = {"f32": "<f", "f64": "<d"}
+            struct_type = M[the_type.__name__]
+            bb = struct.pack(struct_type, value)
         elif isinstance(value, int):
-            the_type = _types.i32
-            bb = struct.pack("<i", value)
+            the_type = _types.i32 if the_type is None else the_type
+            M = {"u8": "<B", "i16": "<h", "i32": "<i", "i64": "<q"}
+            struct_type = M[the_type.__name__]
+            bb = struct.pack(struct_type, value)
         elif isinstance(value, bool):
             the_type = _types.boolean
         else:
@@ -464,24 +465,31 @@ class BaseSpirVGenerator:
             self.gen_instruction("types", cc.OpTypeBool, type_id)
         elif issubclass(the_type, _types.Int):
             type_id = TypeId(the_type)
-            bits = 32
-            if issubclass(the_type, _types.i16):
-                # todo: need OpCapability
-                bits = 16
+            if issubclass(the_type, _types.u8):
+                self._capabilities.add(cc.Capability_Int8)
+                self.gen_instruction("types", cc.OpTypeInt, type_id, 8, 0)
+            elif issubclass(the_type, _types.i16):
+                self._capabilities.add(cc.Capability_Int16)
+                self.gen_instruction("types", cc.OpTypeInt, type_id, 16, 1)
+            elif issubclass(the_type, _types.i32):
+                self.gen_instruction("types", cc.OpTypeInt, type_id, 32, 1)
             elif issubclass(the_type, _types.i64):
-                bits = 64
-            self.gen_instruction(
-                "types", cc.OpTypeInt, type_id, bits, 0
-            )  # no signedness semantics
+                self._capabilities.add(cc.Capability_Int64)
+                self.gen_instruction("types", cc.OpTypeInt, type_id, 64, 1)
+            else:
+                raise TypeError(f"Unknown integer type: {the_type}")
         elif issubclass(the_type, _types.Float):
             type_id = TypeId(the_type)
-            bits = 32
             if issubclass(the_type, _types.f16):
-                # todo: need OpCapability
-                bits = 16
+                self._capabilities.add(cc.Capability_Float16)
+                self.gen_instruction("types", cc.OpTypeFloat, type_id, 16)
+            elif issubclass(the_type, _types.f32):
+                self.gen_instruction("types", cc.OpTypeFloat, type_id, 32)
             elif issubclass(the_type, _types.f64):
-                bits = 64
-            self.gen_instruction("types", cc.OpTypeFloat, type_id, bits)
+                self._capabilities.add(cc.Capability_Float64)
+                self.gen_instruction("types", cc.OpTypeFloat, type_id, 64)
+            else:
+                raise TypeError(f"Unknown float type: {the_type}")
         elif issubclass(the_type, _types.Vector):
             sub_type_id = self.obtain_type_id(the_type.subtype)
             type_id = TypeId(the_type)
