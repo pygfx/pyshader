@@ -4,7 +4,7 @@ Write modern GPU shaders in Python!
 
 # flake8: noqa
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 
 from ._module import ShaderModule
