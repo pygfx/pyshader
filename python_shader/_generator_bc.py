@@ -30,7 +30,7 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         self._output = {}
         self._uniform = {}
         self._buffer = {}
-        self._locationmap = {}  # (kind, location) -> name
+        self._slotmap = {}  # (namespaceidentifier, slot) -> name
         self._image = {}  # differentiate between texture and sampler?
 
         # Resulting values may be given a name so we can pick them up
@@ -129,34 +129,45 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
 
     # %% IO
 
-    def co_resource(self, name, kind, location, typename):
+    def co_resource(self, name, kind, slot, typename):
+
+        bindgroup = 0
+        if isinstance(slot, tuple):
+            bindgroup, slot = slot
 
         # Triage over input kind
         if kind == "input":
             storage_class, iodict = cc.StorageClass_Input, self._input
+            # This is also called "shaderLocation" or "slot" in wgpu
             location_or_binding = cc.Decoration_Location
         elif kind == "output":
             storage_class, iodict = cc.StorageClass_Output, self._output
             location_or_binding = cc.Decoration_Location
-        elif kind == "uniform":  # location == binding
+        elif kind == "uniform":  # slot == binding
             storage_class, iodict = cc.StorageClass_Uniform, self._uniform
             location_or_binding = cc.Decoration_Binding
-        elif kind == "buffer":  # location == binding
+        elif kind == "buffer":  # slot == binding
             # note: this should be cc.StorageClass_StorageBuffer in SpirV 1.4+
             storage_class, iodict = cc.StorageClass_Uniform, self._buffer
             location_or_binding = cc.Decoration_Binding
         else:
             raise RuntimeError(f"Invalid IO kind {kind}")
 
-        # Check if location is taken
-        locationmap_key = (kind, location)
-        if locationmap_key in self._locationmap:
-            other_name = self._locationmap[locationmap_key]
+        # Check if slot is taken.
+        if kind in ("input", "output"):
+            # Locations must be unique per kind.
+            namespace_id = kind
+        else:
+            # Bindings must be unique within a bind group.
+            namespace_id = "bindgroup-" + str(bindgroup)
+        slotmap_key = (namespace_id, slot)
+        if slotmap_key in self._slotmap:
+            other_name = self._slotmap[slotmap_key]
             raise TypeError(
-                f"Location {location} for {kind} {name} already taken by {other_name}."
+                f"The {namespace_id} {slot} for {name} already taken by {other_name}."
             )
         else:
-            self._locationmap[locationmap_key] = name
+            self._slotmap[slotmap_key] = name
 
         # Get the root variable
         if kind in ("input", "output"):
@@ -191,30 +202,32 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
                 "annotations", cc.OpDecorate, var_id, cc.Decoration_BufferBlock
             )
 
-        # Define location of variable
-        if kind in ("buffer", "image"):
+        # Define slot of variable
+        if kind in ("buffer", "image", "uniform"):
+            assert isinstance(slot, int)
             # Default to descriptor set zero
             self.gen_instruction(
-                "annotations", cc.OpDecorate, var_id, cc.Decoration_DescriptorSet, 0
+                "annotations",
+                cc.OpDecorate,
+                var_id,
+                cc.Decoration_DescriptorSet,
+                bindgroup,
             )
             self.gen_instruction(
-                "annotations", cc.OpDecorate, var_id, cc.Decoration_Binding, location
+                "annotations", cc.OpDecorate, var_id, cc.Decoration_Binding, slot
             )
-        elif isinstance(location, int):
-            # todo: is it location_or_binding always LOCATION, also for uniforms?
-            # todo: I think input also needs DescriptorSet for vertex shader, right?
-            # or ... is a vertex buffer defined as kind "buffer", not input?
+        elif isinstance(slot, int):
             self.gen_instruction(
-                "annotations", cc.OpDecorate, var_id, location_or_binding, location
+                "annotations", cc.OpDecorate, var_id, location_or_binding, slot
             )
-        elif isinstance(location, str):
+        elif isinstance(slot, str):
             # Builtin input or output
             try:
-                location = cc.builtins[location]
+                slot = cc.builtins[slot]
             except KeyError:
-                raise NameError(f"Not a known builtin io variable: {location}")
+                raise NameError(f"Not a known builtin io variable: {slot}")
             self.gen_instruction(
-                "annotations", cc.OpDecorate, var_id, cc.Decoration_BuiltIn, location
+                "annotations", cc.OpDecorate, var_id, cc.Decoration_BuiltIn, slot
             )
 
         # Store internal info to derefererence the variables
@@ -250,8 +263,8 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         elif name in self._buffer:
             ob = self._buffer[name]
             assert isinstance(ob, VariableAccessId)
-        elif name in _types.spirv_types_map:  # todo: use type_from_name instead?
-            ob = _types.spirv_types_map[name]
+        elif name in _types.gpu_types_map:  # todo: use type_from_name instead?
+            ob = _types.gpu_types_map[name]
         else:
             raise NameError(f"Using invalid variable: {name}")
         self._stack.append(ob)
@@ -333,6 +346,50 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         else:
             raise NotImplementedError()
 
+    def co_load_attr(self, name):
+        ob = self._stack.pop()
+
+        if isinstance(ob, VariableAccessId) and issubclass(ob.type, _types.Struct):
+            # Struct attribute access
+            if name not in ob.type.keys:
+                raise TypeError(f"Attribute {name} invalid for {ob.type.__name__}.")
+            # Create new variable access for this attr op
+            index = ob.type.keys.index(name)
+            ac = ob.index(self.obtain_constant(index), index)
+            self._stack.append(ac)
+        elif issubclass(ob.type, _types.Vector):
+            indices = []
+            for c in name:
+                if c in "xr":
+                    indices.append(0)
+                elif c in "yg":
+                    indices.append(1)
+                elif c in "zb":
+                    indices.append(2)
+                elif c in "wa":
+                    indices.append(3)
+                else:
+                    raise AttributeError(name)
+            if len(indices) == 1:
+                if isinstance(ob, VariableAccessId):
+                    index_id = self.obtain_constant(indices[0])
+                    result_id = ob.index(index_id)
+                else:
+                    result_id, type_id = self.obtain_value(ob.type.subtype)
+                    self.gen_func_instruction(
+                        cc.OpCompositeExtract, type_id, result_id, ob, indices[0]
+                    )
+            else:
+                result_type = _types.Vector(len(indices), ob.type.subtype)
+                result_id, type_id = self.obtain_value(result_type)
+                self.gen_func_instruction(
+                    cc.OpVectorShuffle, type_id, result_id, ob, ob, *indices
+                )
+            self._stack.append(result_id)
+        else:
+            # todo: not implemented for non VariableAccessId
+            raise NotImplementedError()
+
     def co_load_constant(self, value):
         id = self.obtain_constant(value)
         self._stack.append(id)
@@ -352,26 +409,119 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         val2 = self._stack.pop()
         val1 = self._stack.pop()
 
-        if val1.type is not val2.type:
+        # The ids that will be in the instruction, can be reset
+        id1, id2 = val1, val2
+
+        # Predefine some types
+        scalar_or_vector = _types.Scalar, _types.Vector
+        FOPS = dict(add=cc.OpFAdd, sub=cc.OpFSub, mul=cc.OpFMul, div=cc.OpFDiv)
+        IOPS = dict(add=cc.OpIAdd, sub=cc.OpISub, mul=cc.OpIMul)
+
+        # Get reference types
+        type1 = val1.type
+        reftype1 = type1
+        if issubclass(type1, (_types.Vector, _types.Matrix)):
+            reftype1 = type1.subtype
+        type2 = val2.type
+        reftype2 = type2
+        if issubclass(type2, (_types.Vector, _types.Matrix)):
+            reftype2 = type2.subtype
+
+        tn1 = type1.__name__
+        tn2 = type2.__name__
+
+        if reftype1 is not reftype2:
+            # Let's start by excluding cases where the subtypes differ.
             raise TypeError(
-                f"Cannot {op} values of different types ({val1.type} and {val2.type})"
+                f"Cannot {op} two values with different (sub)types: {tn1} and {tn2}"
             )
-        result_id, type_id = self.obtain_value(val1.type)
 
-        if issubclass(val1.type, _types.Float):
-            M = {
-                "add": cc.OpFAdd,
-                "sub": cc.OpFSub,
-                "mul": cc.OpFMul,
-                "div": cc.OpFDiv,
-            }
-            self.gen_func_instruction(M[op], type_id, result_id, val1, val2)
-        elif issubclass(val1.type, _types.Int):
-            M = {"add": cc.OpIAdd, "subtract": cc.OpISub, "multiply": cc.OpIMul}
-            self.gen_func_instruction(M[op], type_id, result_id, val1, val2)
+        elif type1 is type2 and issubclass(type1, scalar_or_vector):
+            # Types are equal and scalar or vector. Covers a lot of cases.
+            result_id, type_id = self.obtain_value(type1)
+            if issubclass(reftype1, _types.Float):
+                opcode = FOPS[op]
+            elif issubclass(reftype1, _types.Int):
+                opcode = IOPS[op]
+            else:
+                raise TypeError("Cannot {op} values of type {tn1}.")
+
+        elif issubclass(type1, _types.Scalar) and issubclass(type2, _types.Vector):
+            # Convenience - add/mul vectors with scalars
+            if not issubclass(reftype1, _types.Float):
+                raise TypeError(f"Scalar {op} Vector only supported for float subtype.")
+            result_id, type_id = self.obtain_value(type2)  # result is vector
+            if op == "mul":
+                opcode = cc.OpVectorTimesScalar
+                id1, id2 = val2, val1  # swap to put vector first
+            else:
+                opcode = FOPS[op]
+                val3 = self._vector_packing(type2, [val1] * type2.length)
+                id1, id2 = val1, val3
+
+        elif issubclass(type1, _types.Vector) and issubclass(type2, _types.Scalar):
+            # Convenience - add/mul vectors with scalars, opposite order
+            if not issubclass(reftype1, _types.Float):
+                raise TypeError(f"Vector {op} Scalar only supported for float subtype.")
+            result_id, type_id = self.obtain_value(type1)  # result is vector
+            if op == "mul":
+                opcode = cc.OpVectorTimesScalar
+                id1, id2 = val1, val2
+            else:
+                opcode = FOPS[op]
+                val3 = self._vector_packing(type1, [val2] * type1.length)
+                id1, id2 = val1, val3
+
+        elif op != "mul":
+            # The remaining cases are all limited to multiplication
+            raise TypeError(f"Cannot {op} {tn1} and {tn2}, multiply only.")
+
+        elif not issubclass(reftype1, _types.Float):
+            # The remaining cases are all limited to float types
+            raise TypeError(f"Cannot {op} {tn1} and {tn2}, float only.")
+
+        # With that out of the way, the remaining cases are quite short to write.
+
+        elif issubclass(type1, _types.Matrix) and issubclass(type2, _types.Matrix):
+            # Multiply two matrices
+            if type1.cols != type2.rows:
+                raise TypeError(f"Cannot {op} two matrices with incompatible shapes.")
+            type3 = _types.Matrix(type2.cols, type1.rows, type1.subtype)
+            result_id, type_id = self.obtain_value(type3)
+            opcode = cc.OpMatrixTimesMatrix
+
+        elif issubclass(type1, _types.Matrix) and issubclass(type2, _types.Scalar):
+            # Matrix times vector
+            result_id, type_id = self.obtain_value(type1)  # Result is a matrix
+            opcode = cc.OpMatrixTimesScalar
+            id1, id2 = val1, val2
+
+        elif issubclass(type1, _types.Matrix) and issubclass(type2, _types.Scalar):
+            # Matrix times vector, opposite order
+            result_id, type_id = self.obtain_value(type2)  # Result is a matrix
+            opcode = cc.OpMatrixTimesScalar
+            id1, id2 = val2, val1  # reverse
+
+        elif issubclass(type1, _types.Matrix) and issubclass(type2, _types.Vector):
+            # Matrix times Vector
+            if type2.length != type1.cols:
+                raise TypeError(f"Incompatible shape for {tn1} x {tn2}")
+            type3 = _types.Vector(type1.rows, type1.subtype)
+            result_id, type_id = self.obtain_value(type3)
+            opcode = cc.OpMatrixTimesVector
+
+        elif issubclass(type1, _types.Vector) and issubclass(type2, _types.Matrix):
+            # Vector times Matrix
+            if type1.length != type2.rows:
+                raise TypeError(f"Incompatible shape for {tn1} x {tn2}")
+            type3 = _types.Vector(type2.cols, type2.subtype)
+            result_id, type_id = self.obtain_value(type3)
+            opcode = cc.OpVectorTimesMatrix
+
         else:
-            raise TypeError(f"Cannot {op} values of type {val1.type}.")
+            raise TypeError(f"Cannot {op} values of {tn1} and {tn2}.")
 
+        self.gen_func_instruction(opcode, type_id, result_id, id1, id2)
         self._stack.append(result_id)
 
     # %% Helper methods

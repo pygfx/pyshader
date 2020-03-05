@@ -5,7 +5,7 @@ from ._module import ShaderModule
 from .opcodes import OpCodeDefinitions as op
 from ._dis import dis
 from . import _types
-from ._types import spirv_types_map
+from ._types import gpu_types_map
 
 
 def python2shader(func):
@@ -80,13 +80,12 @@ class PyBytecode2Bytecode:
                 raise TypeError(f"Python-shader arg {argname} is not decorated.")
             elif isinstance(resource, _types.BaseShaderResource):
                 kind = resource.kind
-                location = resource.slot
+                slot = resource.slot
                 subtype = resource.subtype
-                # todo: terminology: use location, binding, or slot?
             elif isinstance(resource, tuple) and len(resource) == 3:
-                kind, location, subtype = resource
+                kind, slot, subtype = resource
                 assert isinstance(kind, str)
-                assert isinstance(location, (int, str))
+                assert isinstance(slot, (int, str, tuple))
                 assert isinstance(subtype, (type, str))
             else:
                 raise TypeError(
@@ -102,7 +101,7 @@ class PyBytecode2Bytecode:
                     f"Python-shader arg {argname} has unknown resource kind '{kind}')."
                 )
             # Emit and store in our dict
-            self.emit(op.co_resource, kind + "." + argname, kind, location, subtype)
+            self.emit(op.co_resource, kind + "." + argname, kind, slot, subtype)
             resource_dict[argname] = subtype
 
         self._convert()
@@ -243,8 +242,9 @@ class PyBytecode2Bytecode:
     def _op_load_attr(self):
         i = self._next()
         name = self._co.co_names[i]
-        ob = self._stack.pop()
-        raise NotImplementedError(f"{ob}.{name} load")
+        ob = self._stack.pop()  # noqa
+        self.emit(op.co_load_attr, name)
+        self._stack.append(name)
 
     def _op_store_attr(self):
         i = self._next()
@@ -259,7 +259,7 @@ class PyBytecode2Bytecode:
         args  # todo: not used?
         self._stack[-nargs:] = []
         func = self._stack.pop()
-        if func in spirv_types_map and spirv_types_map[func].is_abstract:
+        if func in gpu_types_map and gpu_types_map[func].is_abstract:
             # A type definition
             type_str = f"{func}({','.join(args)})"
             self._stack.append(type_str)

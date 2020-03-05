@@ -117,6 +117,11 @@ class VariableAccessId(ValueId):
             return VariableAccessId(
                 self.variable, self.storage_class, self.type.subtype, *indices
             )
+        elif issubclass(self.type, _types.Vector):
+            assert field is None
+            return VariableAccessId(
+                self.variable, self.storage_class, self.type.subtype, *indices
+            )
         else:
             raise RuntimeError(f"VariableAccessId cannot index into {self.type}")
 
@@ -383,7 +388,7 @@ class BaseSpirVGenerator:
         assert isinstance(
             the_type, type
         ), f"obtain_value requires a type, not {the_type}"
-        assert issubclass(the_type, _types.SpirVType), f"not a spirv type: {the_type}"
+        assert issubclass(the_type, _types.ShaderType), f"not a spirv type: {the_type}"
         type_id = self.obtain_type_id(the_type)
         value_id = ValueId(the_type)
         return value_id, type_id
@@ -450,7 +455,7 @@ class BaseSpirVGenerator:
         assert isinstance(
             the_type, type
         ), f"obtain_type_id requires a type, not {the_type}"
-        assert issubclass(the_type, _types.SpirVType), f"not a spirv type: {the_type}"
+        assert issubclass(the_type, _types.ShaderType), f"not a spirv type: {the_type}"
         assert not the_type.is_abstract, f"not a concrete spirv type: {the_type}"
 
         # Already know this type?
@@ -497,8 +502,12 @@ class BaseSpirVGenerator:
                 "types", cc.OpTypeVector, type_id, sub_type_id, the_type.length
             )
         elif issubclass(the_type, _types.Matrix):
-            raise NotImplementedError()
-            # OpTypeMatrix
+            sub_vector_type = _types.Vector(the_type.rows, the_type.subtype)
+            column_type_id = self.obtain_type_id(sub_vector_type)
+            type_id = TypeId(the_type)
+            self.gen_instruction(
+                "types", cc.OpTypeMatrix, type_id, column_type_id, the_type.cols
+            )
         elif issubclass(the_type, _types.Array):
             count = the_type.length
             sub_type_id = self.obtain_type_id(the_type.subtype)
