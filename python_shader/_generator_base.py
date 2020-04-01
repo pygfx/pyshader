@@ -8,22 +8,6 @@ import struct
 from . import _spirv_constants as cc
 from . import _types
 
-# todo: add debug info, most notably line numbers, but can also do source code and object names!
-# todo: SpirV supports specialization: setting constants at runtime, can be useful?
-
-
-# Storage class members, used in OpTypePointer, OpTypeForwardPointer, Opvariable, OpGenericCastToPtrExplicit
-STORAGE_CLASSES = dict(
-    input=cc.StorageClass_Input,
-    output=cc.StorageClass_Output,
-    uniform=cc.StorageClass_Uniform,
-    buffer=cc.StorageClass_StorageBuffer,
-    image=cc.StorageClass_Image,
-    # uniform_constant=cc.StorageClass_UniformConstant,
-    # private=cc.StorageClass_Private,  # a constant within this module
-    # function=cc.StorageClass_Function,  # scoped to the current function invokation
-)
-
 
 def str_to_words(s):
     # In SpirV, words are 32bit. Op counting is per word, not per immediate or per byte.
@@ -165,6 +149,20 @@ class VariableAccessId(ValueId):
     resolve = resolve_load
 
 
+class WordPlaceholder:
+    """ Object that holds an integer value (or 4 bytes), which value
+    can be changed as more of the code is parsed. This e.g. allows
+    specifying types with knowledge that we encounter later in the
+    program.
+    """
+
+    def __init__(self, initial_value):
+        self.value = initial_value
+
+    def __repr__(self):
+        return f"~{self.value}"
+
+
 class BaseSpirVGenerator:
     """ Base class that can be used by compiler implementations in the
     last compile step to generate the SpirV code. It has an internal
@@ -195,10 +193,8 @@ class BaseSpirVGenerator:
 
         self._ids = {0: None}  # maps id -> info. For objects, info is a type in _types
         self._constants = {}
-        self._type_name_to_id = {}
+        self._type_hash_to_id = {}
         self._capabilities = set()
-        self.scope_stack = []  # stack of dicts: name -> id, type, type_id
-        # todo: can we do without a stack, pass everything into funcs?
 
         # Section 2.4 of the Spir-V spec specifies the Logical Layout of a Module
         self._sections = {
@@ -353,6 +349,8 @@ class BaseSpirVGenerator:
                 for word in instr_words:
                     if isinstance(word, AnyId):
                         words.append(word.id)
+                    elif isinstance(word, WordPlaceholder):
+                        words.append(word.value)
                     elif isinstance(word, str):
                         words.extend(str_to_words(word))
                     else:
@@ -385,10 +383,6 @@ class BaseSpirVGenerator:
     def obtain_value(self, the_type, name=""):
         """ Create id for a new value. Returns (value_id, type_id).
         """
-        assert isinstance(
-            the_type, type
-        ), f"obtain_value requires a type, not {the_type}"
-        assert issubclass(the_type, _types.ShaderType), f"not a spirv type: {the_type}"
         type_id = self.obtain_type_id(the_type)
         value_id = ValueId(the_type)
         return value_id, type_id
@@ -449,20 +443,35 @@ class BaseSpirVGenerator:
         return VariableAccessId(var_id, storage_class, the_type, name=name)
 
     def obtain_type_id(self, the_type):
-        """ Get the id for the given type_name. Generates a type
+        """ Get the id for the given type. Generates a type
         definition instruction as needed.
         """
-        assert isinstance(
-            the_type, type
-        ), f"obtain_type_id requires a type, not {the_type}"
-        assert issubclass(the_type, _types.ShaderType), f"not a spirv type: {the_type}"
-        assert not the_type.is_abstract, f"not a concrete spirv type: {the_type}"
+        if isinstance(the_type, tuple):
+            if not (
+                the_type
+                and isinstance(the_type[0], cc.Enum)
+                and the_type[0].name.startswith("OpType")
+            ):
+                raise TypeError(
+                    "ShaderType can be tuple only if it specifies the OpTypeXYZ"
+                )
+            type_hash = hash(the_type)
+        else:
+            if not (
+                isinstance(the_type, type) and issubclass(the_type, _types.ShaderType)
+            ):
+                raise TypeError(f"not a ShaderType subclass: {the_type}")
+            assert not the_type.is_abstract, f"not a concrete spirv type: {the_type}"
+            type_hash = the_type.__name__
 
         # Already know this type?
-        if the_type.__name__ in self._type_name_to_id:
-            return self._type_name_to_id[the_type.__name__]
+        if type_hash in self._type_hash_to_id:
+            return self._type_hash_to_id[type_hash]
 
-        if issubclass(the_type, _types.void):
+        if isinstance(the_type, tuple):
+            type_id = TypeId(the_type)  # all info is now on TypeId instance
+            self.gen_instruction("types", the_type[0], type_id, *the_type[1:])
+        elif issubclass(the_type, _types.void):
             type_id = TypeId(the_type)
             self.gen_instruction("types", cc.OpTypeVoid, type_id)
         elif issubclass(the_type, _types.boolean):
@@ -535,6 +544,5 @@ class BaseSpirVGenerator:
         else:
             raise NotImplementedError(the_type)
 
-        # todo: also OpTypeImage and OpTypeSampledImage
-        self._type_name_to_id[the_type.__name__] = type_id
+        self._type_hash_to_id[type_hash] = type_id
         return type_id

@@ -2,7 +2,12 @@
 Implements generating SpirV code from our bytecode.
 """
 
-from ._generator_base import BaseSpirVGenerator, ValueId, VariableAccessId
+from ._generator_base import (
+    BaseSpirVGenerator,
+    ValueId,
+    VariableAccessId,
+    WordPlaceholder,
+)
 from . import _spirv_constants as cc
 from . import _types
 
@@ -12,6 +17,23 @@ from .opcodes import OpCodeDefinitions
 # - expect no func or entrypoint inside a func definition
 # - expect other opcodes only inside a func definition
 # - expect input/output/uniform at the very start (or inside an entrypoint?)
+
+
+image_formats_that_need_no_ext = {
+    cc.ImageFormat_Rgba32f,
+    cc.ImageFormat_Rgba16f,
+    cc.ImageFormat_Rgba32i,
+    cc.ImageFormat_Rgba32ui,
+    cc.ImageFormat_Rgba16i,
+    cc.ImageFormat_Rgba16ui,
+    cc.ImageFormat_Rgba8,
+    cc.ImageFormat_Rgba8i,
+    cc.ImageFormat_Rgba8ui,
+    cc.ImageFormat_Rgba8Snorm,
+    cc.ImageFormat_R32f,
+    cc.ImageFormat_R32i,
+    cc.ImageFormat_R32ui,
+}
 
 
 class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
@@ -30,8 +52,12 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         self._output = {}
         self._uniform = {}
         self._buffer = {}
+        self._sampler = {}
+        self._texture = {}
         self._slotmap = {}  # (namespaceidentifier, slot) -> name
-        self._image = {}  # differentiate between texture and sampler?
+
+        # We keep track of sampler for each combination of texture and sampler
+        self._texture_samplers = {}
 
         # Resulting values may be given a name so we can pick them up
         self._aliases = {}
@@ -124,8 +150,62 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
                     raise TypeError("Scalar convert needs exactly one argument.")
                 result = self._convert_scalar(func, args[0])
             self._stack.append(result)
+
+        elif isinstance(func, str) and func.startswith(("stdlib.", "texture.")):
+            _, _, funcname = func.partition(".")
+
+            # OpTypeImage
+            if funcname in ("imageLoad", "read"):
+                tex, coord = args
+                self._capabilities.add(cc.Capability_StorageImageReadWithoutFormat)
+                tex.depth.value, tex.sampled.value = 0, 2
+                if coord.type not in (_types.i32, _types.ivec2, _types.ivec3):
+                    raise TypeError(
+                        "Expected texture coords to be i32, ivec2 or ivec3."
+                    )
+                vec_sample_type = _types.Vector(4, tex.sample_type)
+                result_id, type_id = self.obtain_value(vec_sample_type)
+                self.gen_func_instruction(
+                    cc.OpImageRead, type_id, result_id, tex, coord,
+                )
+                self._stack.append(result_id)
+            elif funcname in ("imageStore", "write"):
+                tex, coord, color = args
+                self._capabilities.add(cc.Capability_StorageImageWriteWithoutFormat)
+                tex.depth.value, tex.sampled.value = 0, 2
+                if coord.type not in (_types.i32, _types.ivec2, _types.ivec3):
+                    raise TypeError(
+                        "Expected texture coords to be i32, ivec2 or ivec3."
+                    )
+                if tex.sample_type is _types.i32 and color.type is not _types.ivec4:
+                    raise TypeError(
+                        f"Expected texture value to be ivec4, not {color.type}"
+                    )
+                elif tex.sample_type is _types.f32 and color.type is not _types.vec4:
+                    raise TypeError(
+                        f"Expected texture value to be vec4, not {color.type}"
+                    )
+                self.gen_func_instruction(cc.OpImageWrite, tex, coord, color)
+                self._stack.append(None)  # this call returns None, gets popped
+            elif funcname == "sample":  # -> from a texture
+                tex, sam, coord = args
+                tex.depth.value, tex.sampled.value = 0, 1
+                sample_type = tex.sample_type
+                result_id, type_id = self.obtain_value(_types.Vector(4, sample_type))
+                self.gen_func_instruction(
+                    cc.OpImageSampleExplicitLod,  # or cc.OpImageSampleImplicitLod,
+                    type_id,
+                    result_id,
+                    self.get_texture_sampler(tex, sam),
+                    coord,
+                    cc.ImageOperandsMask_MaskNone | cc.ImageOperandsMask_Lod,
+                    self.obtain_constant(0.0),
+                )
+                self._stack.append(result_id)
+            else:
+                raise NotImplementedError(f"Unknown function: {func} ")
         else:
-            raise NotImplementedError()
+            raise TypeError(f"Not callable: {func}")
 
     # %% IO
 
@@ -134,6 +214,11 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         bindgroup = 0
         if isinstance(slot, tuple):
             bindgroup, slot = slot
+
+        # --> https://www.khronos.org/opengl/wiki/Layout_Qualifier_(GLSL)
+
+        # todo: should we check if the incoming code has the proper amount of skipping
+        # in input and output slots?
 
         # Triage over input kind
         if kind == "input":
@@ -149,6 +234,12 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         elif kind == "buffer":  # slot == binding
             # note: this should be cc.StorageClass_StorageBuffer in SpirV 1.4+
             storage_class, iodict = cc.StorageClass_Uniform, self._buffer
+            location_or_binding = cc.Decoration_Binding
+        elif kind == "sampler":
+            storage_class, iodict = cc.StorageClass_UniformConstant, self._sampler
+            location_or_binding = cc.Decoration_Binding
+        elif kind == "texture":
+            storage_class, iodict = cc.StorageClass_UniformConstant, self._texture
             location_or_binding = cc.Decoration_Binding
         else:
             raise RuntimeError(f"Invalid IO kind {kind}")
@@ -174,7 +265,7 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
             var_name = "var-" + name
             var_type = _types.type_from_name(typename)
             subtypes = None
-        else:
+        elif kind in ("uniform", "buffer"):
             # Block - Consider the variable to be a struct
             var_name = "var-" + name
             var_type = _types.type_from_name(typename)
@@ -185,10 +276,81 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
                 subtypes = {name: var_type}
                 var_type = _types.Struct(**subtypes)
                 var_name = "var-" + var_type.__name__
+        elif kind == "sampler":
+            var_name = "var-" + name
+            var_type = (cc.OpTypeSampler,)
+            subtypes = None
+        elif kind == "texture":
+            var_name = "var-" + name
+            # Get a list of type info parts
+            type_info = typename.lower().replace(",", " ").split()
+            # Get dimension of the texture, and whether it is arrayed
+            arrayed = 0
+            if "1d" in type_info or "1d-array" in type_info:
+                dim = cc.Dim_Dim1D
+                arrayed = 1 if "1d-array" in type_info else 0
+                self._capabilities.add(cc.Capability_Image1D)
+                # self._capabilities.add(cc.Capability_Sampled1D)
+            elif "2d" in type_info or "2d-array" in type_info:
+                dim = cc.Dim_Dim2D
+                arrayed = 1 if "2d-array" in type_info else 0
+            elif "3d" in type_info or "3d-array" in type_info:
+                dim = cc.Dim_Dim3D
+                arrayed = 1 if "3d-array" in type_info else 0
+            elif "cube" in type_info or "cube-array" in type_info:
+                dim = cc.Dim_Cube
+                arrayed = 1 if "cube-array" in type_info else 0
+            else:
+                raise ValueError("Texture type info does not specify dimensionality.")
+            # Get format
+            fmt = cc.ImageFormat_Unknown
+            sample_type = None  # can be set through format or specified explicitly
+            for part in type_info:
+                if part.startswith("r"):
+                    part = part.replace("uint", "ui").replace("sint", "i")
+                    part = part.replace("int", "i").replace("float", "f")
+                    try:
+                        fmt = getattr(cc, "ImageFormat_R" + part[1:])
+                    except AttributeError:
+                        continue
+                    if part.endswith(("f", "norm")):
+                        sample_type = _types.f32
+                    else:
+                        sample_type = _types.i32
+                    break
+            if fmt and fmt not in image_formats_that_need_no_ext:
+                self._capabilities.add(cc.Capability_StorageImageExtendedFormats)
+            # Get sample type (type of each of the 4 components when sampling)
+            if "i32" in type_info:
+                sample_type = _types.i32
+            elif "f32" in type_info:
+                sample_type = _types.f32
+            if sample_type is None:  # note that it can have been set from fmt
+                raise ValueError(
+                    "Texture type info does not specify format nor sample type."
+                )
+            # Get whether the texture is sampled - 0: unknown, 1: sampled, 2: storage
+            sampled = WordPlaceholder(0)  # -> to be set later
+            # Get depth, ms - 0: no, 1: yes, 2: unknown
+            depth = WordPlaceholder(2)
+            # Get multisampling
+            ms = 1 if "ms" in type_info else 0
+            # We now have all the info!
+            stype = self.obtain_type_id(sample_type)
+            var_type = (cc.OpTypeImage, stype, dim, depth, arrayed, ms, sampled, fmt)
+            subtypes = None
+        else:
+            assert False  # unreachable
 
         # Create VariableAccessId object
         var_access = self.obtain_variable(var_type, storage_class, var_name)
         var_id = var_access.variable
+
+        # On textures, store some more info that we need when sampling
+        if kind == "texture":
+            var_access.sample_type = sample_type
+            var_access.sampled = sampled  # a word placeholder
+            var_access.depth = depth  # a word placeholder
 
         # Dectorate block for uniforms and buffers
         if kind == "uniform":
@@ -242,6 +404,20 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
                     raise NameError(f"{kind} {subname} already exists")
                 iodict[subname] = var_access.index(index_id, i)
 
+    def get_texture_sampler(self, texture, sampler):
+        """ texture and sampler are bot VariableAccessId.
+        """
+        key = (id(texture), id(sampler))
+        if key not in self._texture_samplers:
+            tex_type_id = self.obtain_type_id(texture.type)
+            restype = (cc.OpTypeSampledImage, tex_type_id)
+            result_id, type_id = self.obtain_value(restype)
+            self.gen_func_instruction(
+                cc.OpSampledImage, type_id, result_id, texture, sampler
+            )
+            self._texture_samplers[key] = result_id
+        return self._texture_samplers[key]
+
     # %% Basics
 
     def co_pop_top(self):
@@ -263,10 +439,24 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         elif name in self._buffer:
             ob = self._buffer[name]
             assert isinstance(ob, VariableAccessId)
+        elif name in self._sampler:
+            ob = self._sampler[name]
+            assert isinstance(ob, VariableAccessId)
+        elif name in self._texture:
+            ob = self._texture[name]
+            assert isinstance(ob, VariableAccessId)
+        elif name.startswith(("stdlib.", "texture.")):
+            ob = name
         elif name in _types.gpu_types_map:  # todo: use type_from_name instead?
             ob = _types.gpu_types_map[name]
         else:
-            raise NameError(f"Using invalid variable: {name}")
+            # Well, it could be a more special type ... try to convert!
+            try:
+                ob = _types.type_from_name(name)
+            except Exception:
+                ob = None
+            if ob is None:
+                raise NameError(f"Using invalid variable: {name}")
         self._stack.append(ob)
 
     def co_store_name(self, name):
@@ -297,7 +487,8 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
 
         elif issubclass(container.type, _types.Array):
 
-            # todo: maybe ... the variable for a constant should be created only once ... instead of every time it gets indexed
+            # todo: maybe ... the variable for a constant should be created only once ...
+            # ... instead of every time it gets indexed
             # Put the array into a variable
             var_access = self.obtain_variable(container.type, cc.StorageClass_Function)
             container_variable = var_access.variable
@@ -349,7 +540,9 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
     def co_load_attr(self, name):
         ob = self._stack.pop()
 
-        if isinstance(ob, VariableAccessId) and issubclass(ob.type, _types.Struct):
+        if not isinstance(getattr(ob, "type"), type):
+            raise AttributeError("Invalid attribute access")
+        elif isinstance(ob, VariableAccessId) and issubclass(ob.type, _types.Struct):
             # Struct attribute access
             if name not in ob.type.keys:
                 raise TypeError(f"Attribute {name} invalid for {ob.type.__name__}.")

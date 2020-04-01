@@ -18,8 +18,8 @@ script to get new hashes when needed:
 """
 
 import python_shader
-from python_shader import InputResource, OutputResource, BufferResource
-from python_shader import i32, vec2, vec3, vec4, Array
+from python_shader import InputResource, OutputResource, BufferResource, stdlib
+from python_shader import f32, i32, vec2, vec3, vec4, ivec3, ivec4, Array
 
 from pytest import mark, raises
 from testutils import can_use_vulkan_sdk, validate_module, run_test_and_print_new_hashes
@@ -83,6 +83,58 @@ def test_cannot_assign_same_slot():
     assert "already taken" in str(err.value)
 
 
+def test_texture_2d_f32():
+    # This shader can be used with float and int-norm texture formats
+
+    @python2shader_and_validate
+    def fragment_shader(
+        texcoord: ("input", 0, vec2),
+        outcolor: ("output", 0, vec4),
+        tex: ("texture", (0, 1), "2d f32"),
+        sampler: ("sampler", (0, 2), ""),
+    ):
+        outcolor = tex.sample(sampler, texcoord)  # noqa
+
+
+def test_texture_1d_i32():
+    # This shader can be used with non-norm integer texture formats
+
+    @python2shader_and_validate
+    def fragment_shader(
+        texcoord: ("input", 0, f32),
+        outcolor: ("output", 0, vec4),
+        tex: ("texture", (0, 1), "1d i32"),
+        sampler: ("sampler", (0, 2), ""),
+    ):
+        outcolor = vec4(tex.sample(sampler, texcoord))  # noqa
+
+
+def test_texture_3d_r16i():
+    # This shader explicitly specifies r16i format
+
+    @python2shader_and_validate
+    def fragment_shader(
+        texcoord: ("input", 0, vec3),
+        outcolor: ("output", 0, vec4),
+        tex: ("texture", (0, 1), "3d r16i"),
+        sampler: ("sampler", (0, 2), ""),
+    ):
+        # outcolor = vec4(tex.sample(sampler, texcoord))  # noqa
+        outcolor = vec4(stdlib.sample(tex, sampler, texcoord))  # noqa
+
+
+def test_texcomp_2d_rg32i():
+    # compute shaders always need the format speci
+
+    @python2shader_and_validate
+    def compute_shader(
+        index: ("input", "GlobalInvocationId", ivec3), tex: ("texture", 0, "2d rg32i"),
+    ):
+        color = tex.read(index.xy)
+        color = ivec4(color.x + 1, color.y + 2, color.z + 3, color.a + 4)
+        tex.write(index.xy, color)
+
+
 # %% Utils for this module
 
 
@@ -98,6 +150,10 @@ HASHES = {
     "test_triangle_shader.vertex_shader": ("829ed988549d24fc", "53d4b596bc25b5a0"),
     "test_triangle_shader.fragment_shader": ("a617056d738350de", "6febd7dab6d72c8d"),
     "test_compute_shader.compute_shader": ("7b03b3564a72be3c", "46f084870ce2681b"),
+    "test_texture_2d_f32.fragment_shader": ("91424c7a5253087f", "d31253816d239475"),
+    "test_texture_1d_i32.fragment_shader": ("ccb700086b9676d6", "a3bb96b87afa94b2"),
+    "test_texture_3d_r16i.fragment_shader": ("4b7fd0d410a5ea46", "ef6296c81906eec4"),
+    "test_texcomp_2d_rg32i.compute_shader": ("acf2d8a9c1c111dc", "72e582d70b4fd540",),
 }
 
 
