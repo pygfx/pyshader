@@ -1,5 +1,6 @@
 import inspect
 from dis import dis as pprint_bytecode
+from dis import cmp_op
 
 from ._coreutils import ShaderError
 from ._module import ShaderModule
@@ -52,6 +53,7 @@ class PyBytecode2Bytecode:
         self._co = self._py_func.__code__
 
         self._opcodes = []
+        self._opcode_map = {}  # map Python bytecode indices to opcode indices
 
         self._input = {}
         self._output = {}
@@ -59,6 +61,24 @@ class PyBytecode2Bytecode:
         self._buffer = {}
         self._texture = {}
         self._sampler = {}
+
+        # Keep track of labels
+        self._labels = {}
+
+        # Protected labels wont automatically generate a co_label,
+        # and cannot be resolved if block is empty
+        self._protected_labels = set()
+
+        # Bytecode is a stack machine.
+        self._stack = []
+
+        # Collect info about loop locations beforehand
+        self._loops_to_handle = self._pre_detect_loops()
+
+        # The loop_info objects are popped from the above lists and put on this stack
+        self._loop_stack = [{}]  # prepend empty dict to be able to do get()
+
+        self._pointer = -1
 
         # todo: allow user to specify name otherwise?
         entrypoint_name = "main"  # py_func.__name__
@@ -87,6 +107,7 @@ class PyBytecode2Bytecode:
                 assert isinstance(kind, str)
                 assert isinstance(slot, (int, str, tuple))
                 assert isinstance(subtype, (type, str))
+                slot = list(slot) if isinstance(slot, tuple) else slot  # json
             else:
                 raise TypeError(
                     f"Python-shader arg {argname} must be a 3-tuple, "
@@ -117,6 +138,12 @@ class PyBytecode2Bytecode:
                 raise RuntimeError(
                     f"Got {len(args)} args for {opcode}({', '.join(argnames)})"
                 )
+
+        if opcode == "co_branch":
+            assert not self._opcodes[-1][0].startswith("co_branch")
+        bytecode_index = self._pointer - 2
+        if bytecode_index not in self._opcode_map:
+            self._opcode_map[bytecode_index] = len(self._opcodes)
         self._opcodes.append((opcode, *args))
 
     def dump(self):
@@ -124,36 +151,37 @@ class PyBytecode2Bytecode:
 
     def _convert(self):
 
-        # co.co_code  # bytes
-        #
-        # co.co_name
-        # co.co_filename
-        # co.co_firstlineno
-        #
-        # co.co_argcount
-        # co.co_kwonlyargcount
-        # co.co_nlocals
-        # co.co_consts
-        # co.co_varnames
-        # co.co_names  # nonlocal names
-        # co.co_cellvars
-        # co.co_freevars
-        #
-        # co.co_stacksize  # the maximum depth the stack can reach while executing the code
-        # co.co_flags  # flags if this code object has nested scopes/generators/etc.
-        # co.co_lnotab  # line number table  https://svn.python.org/projects/python/branches/pep-0384/Objects/lnotab_notes.txt
+        # Attributes of self._co: co_code, co_name, co_filename, co_firstlineno,
+        # co_argcount, co_kwonlyargcount, co_nlocals, co_consts, co_varnames,
+        # co_names, co_cellvars, co_freevars, co_stacksize, co_flags, co_lnotab
+        # -> co_lnotab  is line number table
+        #    https://svn.python.org/projects/python/branches/pep-0384/Objects/lnotab_notes.txt
 
         # Pointer in the bytecode stream
         self._pointer = 0
 
-        # Bytecode is a stack machine.
-        self._stack = []
-
-        # Python variable names -> (SpirV object id, type_id)
-        # self._aliases = {}
-
         # Parse
         while self._pointer < len(self._co.co_code):
+            if (
+                self._loops_to_handle
+                and self._pointer == self._loops_to_handle[0]["start"]
+            ):
+                self._start_loop(self._loops_to_handle.pop(0))
+            elif self._pointer == self._loop_stack[-1].get("end"):
+                self._end_loop()
+            elif (
+                self._pointer in self._labels
+                and self._pointer not in self._protected_labels
+            ):
+                label = self._labels[self._pointer]
+                last_opcode = self._opcodes[-1][0]
+                if last_opcode not in (
+                    "co_branch",
+                    "co_branch_conditional",
+                    "co_branch_loop",
+                ):
+                    self.emit(op.co_branch, label)
+                self.emit(op.co_label, label)
             opcode = self._next()
             opname = dis.opname[opcode]
             method_name = "_op_" + opname.lower()
@@ -166,6 +194,281 @@ class PyBytecode2Bytecode:
             else:
                 method()
 
+        # Some post-processing (order is important)
+        self._fix_empty_blocks()
+        self._fix_or_control_flow()
+        self._fix_consistent_labels()
+
+        # Note: at some point we tried to detect ternary ops (xx if yy else zz)
+        # and resolved them into op_select. This detection relied on the fact that
+        # a ternary op leaves an item at the stack in both its branches.
+        # However, this can also happen in: a = b + (c if d else e)
+        # In this statement b is put on the stack before entering the ternary,
+        # so we'd detect that as part of a ternary. Maybe this can be detected
+        # too, but things get complex quickly, and I did not feel confident in
+        # this approach anymore. We could consider giving at another shot later,
+        # if it matters significantly for performance.
+
+    def _pre_detect_loops(self):
+
+        # Loops can be detected by a jump that goes backwards in the bytecode.
+        # We have to examine the bytecode to find the loop structure, and this
+        # consists mostly of looking at jumps, so we first detect all jumps.
+
+        # Collect jumps in the bytecode
+        jumps = {}
+        jump_ops = (
+            dis.opmap["JUMP_ABSOLUTE"],
+            dis.opmap["JUMP_FORWARD"],
+            dis.opmap["POP_JUMP_IF_FALSE"],
+            dis.opmap["POP_JUMP_IF_TRUE"],
+        )
+        for i in range(0, len(self._co.co_code), 2):
+            if self._co.co_code[i] in jump_ops:
+                if self._co.co_code[i] == dis.opmap["JUMP_FORWARD"]:
+                    target = i + self._co.co_code[i + 1] + 2
+                else:
+                    target = self._co.co_code[i + 1]
+                jumps[i] = target
+
+        # Look for loop starts
+        loop_starts = []
+        for i, target in jumps.items():
+            if target < i and target not in loop_starts:
+                loop_starts.append(target)
+
+        # Sort the starts: this is the order in which thery are encountered!
+        loop_starts.sort()
+
+        # Return list of loop_info objects
+        loop_infos = []
+        for i in range(len(loop_starts)):
+            loop_info = self._pre_detect_loop(jumps, loop_infos, loop_starts[i])
+            loop_infos.append(loop_info)
+        return loop_infos
+
+    def _pre_detect_loop(self, jumps, prev_loops, loop_start):
+
+        # The structure of a for-loop required by SpirV / our internal bytecode:
+        #
+        # * block zero: the block from which the loop starts
+        # * header block: we only have a co_branch_loop here
+        # * iter block: ending in a co_branch_conditional that goes to the body or merge block
+        # * body block: the loop body
+        # * continue block: may increase iter variable, jumps to header block
+        # * merge block: the loop ends here
+
+        # We only know that loop_start is the start of the "header block"
+        # (in the py bytecode). So we are going to trace all the info we need ...
+
+        # Look for jumps to the header -> to find the end, and continue's
+        jumps_to_start = []
+        for i, target in jumps.items():
+            if target < i and target == loop_start:
+                jumps_to_start.append(i)
+
+        # Now we know the end (but there may be two positions to jump to)
+        assert len(jumps_to_start) > 0
+        our_ends = [jumps_to_start[-1] + 2]
+        if self._co.co_code[our_ends[0]] == dis.opmap["POP_BLOCK"]:
+            our_ends.append(our_ends[0] + 2)
+        ends = our_ends.copy()
+        ends += [x["start"] for x in prev_loops] + [x["end"] for x in prev_loops]
+
+        # Take a look at that first jump. If it jumps to the merge_block,
+        # we have a valid iter block.
+        first_jump_is_to_end = body_target = None
+        for i, target in jumps.items():
+            if i > loop_start:
+                if target in ends:
+                    first_jump_is_to_end = True
+                    body_target = i + 2
+                elif self._co.co_code[target] == dis.opmap["BREAK_LOOP"]:
+                    first_jump_is_to_end = True
+                    body_target = i + 2
+                break
+
+        # Check what kind of loop this is
+        has_for_iter = self._co.co_code[loop_start] == dis.opmap["FOR_ITER"]
+
+        # Init loop info
+        loop_info = {}
+        loop_info["type"] = "for" if has_for_iter else "while"
+        loop_info["start"] = loop_start
+        loop_info["end"] = our_ends[-1]
+        loop_info["first_jump_is_to_end"] = first_jump_is_to_end
+
+        # Define the labels that we need for the loop structure
+        loop_idx = len(prev_loops) + 1
+        loop_info["header_label"] = f"Lh{loop_idx}"
+        loop_info["iter_label"] = f"Li{loop_idx}"
+        loop_info["continue_label"] = f"Lc{loop_idx}"
+        loop_info["body_label"] = f"Lb{loop_idx}"
+        loop_info["merge_label"] = f"Lm{loop_idx}"
+
+        # Define label mappings
+        loop_info["labelmap"] = labelmap = {}
+
+        # The Py bytecode jumps to loop_start become branches to continue_label.
+        # Also prevent continue label from being aut-created and collapsed.
+        labelmap[loop_start] = loop_info["continue_label"]
+        self._protected_labels.add(loop_start)
+
+        # Any jumps to what could mean end-targets should be branches to merge_label.
+        for end in ends:
+            labelmap[end] = loop_info["merge_label"]
+        for end in our_ends:
+            self._protected_labels.add(end)
+
+        # If we're not generating the body_label, we want it auto-emitted!
+        if first_jump_is_to_end and loop_info["type"] == "while":
+            self._labels[body_target] = loop_info["body_label"]
+        else:
+            pass  # we create a body in _start_loop()
+
+        # Protect the custom labels for collapsing (when empty) for good measure
+        for label_id in ["iter_label", "continue_label", "merge_label", "body_label"]:
+            self._protected_labels.add(loop_info[label_id])
+
+        return loop_info
+
+    def _replace_labels(self, labels_to_replace):
+
+        # Handle recursion
+        for key in list(labels_to_replace):
+            while labels_to_replace[key] in labels_to_replace:
+                labels_to_replace[key] = labels_to_replace[labels_to_replace[key]]
+
+        # Replace the labels
+        for i in range(len(self._opcodes)):
+            if self._opcodes[i][0] in ("co_label", "co_branch"):
+                if self._opcodes[i][1] in labels_to_replace:
+                    self._opcodes[i] = (
+                        self._opcodes[i][0],
+                        labels_to_replace[self._opcodes[i][1]],
+                    )
+            elif self._opcodes[i][0] in ("co_branch_conditional", "co_branch_loop"):
+                op = list(self._opcodes[i])
+                changed = False
+                for j in range(1, len(op)):
+                    if op[j] in labels_to_replace:
+                        op[j] = labels_to_replace[op[j]]
+                        changed = True
+                if changed:
+                    self._opcodes[i] = tuple(op)
+
+    def _fix_empty_blocks(self):
+        # Sometimes Python bytecode contains an empty block (i.e. code
+        # jumpt to a location, from which it jumps to another location
+        # immediately). In such cases, the control flow can be
+        # incosistent, with some branches jumping to that empty block,
+        # and some skipping it. The code below finds such empty blocks
+        # and resolve them.
+
+        labels_to_replace = {}
+
+        def _set_new_label(label, new_label):
+            while label in labels_to_replace:
+                label = labels_to_replace[label]
+            labels_to_replace[label] = new_label
+
+        for i in reversed(range(len(self._opcodes) - 1)):
+            if (
+                self._opcodes[i][0] == "co_label"
+                and self._opcodes[i + 1][0] == "co_branch"
+                and self._opcodes[i][1] not in self._protected_labels
+            ):
+                _set_new_label(self._opcodes[i][1], self._opcodes[i + 1][1])
+                self._opcodes.pop(i)
+                self._opcodes.pop(i)
+
+        self._replace_labels(labels_to_replace)
+
+    def _fix_or_control_flow(self):
+        # In `a or b` many languages don't evaluate `b` if `a` evaluates
+        # to truethy. This introduces more complex control flow, with
+        # multiple branches passing through the same block. SpirV does
+        # not allow this. Sadly for us, the bytecode has already
+        # resolved `or`'s into control flow ... so we have to detect
+        # the pattern. In `a and b`, `b` is not evaluated when `a`
+        # evaluates to falsy. But in this case the resulting control
+        # flow is fine, and we're probably unable to detect it reliably.
+
+        def _get_block_to_resolve():
+            conditional_branches = {}
+            cur_block = None
+            cur_block_i = 0
+            for i in range(len(self._opcodes)):
+                opcode, *args = self._opcodes[i]
+                if opcode == "co_label":
+                    cur_block = args[0]
+                    cur_block_i = i
+                elif opcode == "co_branch_conditional":
+                    # Detect that this conditional branch is part of an earlier comparison
+                    if args[0] in conditional_branches:
+                        other, ii = conditional_branches[args[0]]
+                        if other == cur_block:
+                            return ii, cur_block_i, i
+                    elif args[1] in conditional_branches:
+                        other, ii = conditional_branches[args[1]]
+                        if other == cur_block:
+                            return ii, cur_block_i, i
+                    # Register this branch (note that this may overwrite keys, which is ok)
+                    conditional_branches[args[0]] = args[1], i
+                    conditional_branches[args[1]] = args[0], i
+
+        while True:
+            block = _get_block_to_resolve()
+            if not block:
+                break
+            i_ins, i_label, i_cond = block
+            # Get all the labels
+            labels1 = self._opcodes[i_ins][1:]  # this label and the common block
+            labels2 = self._opcodes[i_cond][1:]  # the common block and the else
+            # Rip out the current label
+            selection = self._opcodes[i_label + 1 : i_cond]
+            self._opcodes[i_label : i_cond + 1] = []
+            # Determine how to combine these
+            if labels1[0] == labels2[0]:  # comp1 is true or comp2 is true
+                selection.append(("co_binary_op", "or"))
+                selection.append(("co_branch_conditional", labels1[0], labels2[1]))
+            elif labels1[0] == labels2[1]:  # comp1 is true or comp2 is false
+                selection.append(("co_unary_op", "not"))
+                selection.append(("co_binary_op", "or"))
+                selection.append(("co_branch_conditional", labels1[0], labels2[0]))
+            elif labels1[1] == labels2[0]:  # comp1 is false or comp2 is true
+                selection.insert(0, ("co_unary_op", "not"))
+                selection.append(("co_binary_op", "or"))
+                selection.append(("co_branch_conditional", labels1[1], labels2[1]))
+            elif labels1[1] == labels2[1]:  # comp1 is false or comp2 is false
+                selection.append(("co_binary_op", "and"))
+                selection.append(("co_unary_op", "not"))
+                selection.append(("co_branch_conditional", labels1[1], labels2[0]))
+            # Put it back in with the parent label
+            self._opcodes[i_ins : i_ins + 1] = selection
+
+    def _fix_consistent_labels(self):
+        # Rename the block labels, so that they are numbered in order
+        # of appearance of the co_label. This also makes the resulting
+        # bytecode consistent between Python versions/implementations.
+
+        labels_to_replace = {}
+
+        def _set_new_label(label, new_label):
+            while label in labels_to_replace:
+                label = labels_to_replace[label]
+            labels_to_replace[label] = new_label
+
+        count = 0
+        for i in range(len(self._opcodes)):
+            if self._opcodes[i][0] == "co_label":
+                label = self._opcodes[i][1]
+                if not label.startswith("L"):
+                    count += 1
+                    _set_new_label(label, f"L{count}")
+
+        self._replace_labels(labels_to_replace)
+
     def _next(self):
         res = self._co.co_code[self._pointer]
         self._pointer += 1
@@ -173,6 +476,18 @@ class PyBytecode2Bytecode:
 
     def _peak_next(self):
         return self._co.co_code[self._pointer]
+
+    def _get_label(self, pointer_pos):
+        loop_labels = self._loop_stack[-1].get("labelmap", {})
+        if pointer_pos in loop_labels:
+            return loop_labels[pointer_pos]
+        elif pointer_pos not in self._labels:
+            # Labels are set to bytecode index at first. Later we turn
+            # them into values that are consistent across Python
+            # versions. The final label starts with "L", and labels
+            # starting with "L" will not be renamed.
+            self._labels[pointer_pos] = str(pointer_pos)
+        return self._labels[pointer_pos]
 
     # %%
 
@@ -185,7 +500,10 @@ class PyBytecode2Bytecode:
         self._next()
         result = self._stack.pop()
         assert result is None
-        # for now, there is no return in our-bytecode
+        if self._pointer == len(self._co.co_code):
+            pass
+        else:
+            self.emit(op.co_return)
 
     def _op_load_fast(self):
         # store a variable that is used in an inner scope.
@@ -251,6 +569,8 @@ class PyBytecode2Bytecode:
         name = self._co.co_names[i]
         if name == "stdlib":
             self._stack.append(stdlib)
+        elif name == "range":
+            self._stack.append(name)
         else:
             self.emit(op.co_load_name, name)
             self._stack.append(name)
@@ -322,6 +642,29 @@ class PyBytecode2Bytecode:
             assert ob.startswith("texture.")  # a texture object
             self.emit(op.co_call, nargs + 1)
             self._stack.append(None)
+        elif func == "range":
+            if not (
+                self._co.co_code[self._pointer] == dis.opmap["GET_ITER"]
+                and self._co.co_code[self._pointer + 2] == dis.opmap["FOR_ITER"]
+            ):
+                raise ShaderError("range() can only be used as a for-loop iter.")
+            loop_info = self._loops_to_handle[0]
+            assert loop_info["start"] == self._pointer + 2
+            loop_info["range_is_set"] = True
+            if len(args) == 1:
+                self.emit(op.co_load_constant, 0)
+                self.emit(op.co_rot_two)
+                self.emit(op.co_load_constant, 1)
+            elif len(args) == 2:
+                self.emit(op.co_load_constant, 1)
+            elif len(args) == 3:
+                step = args[2]
+                if not (isinstance(step, int) and step > 0):
+                    raise ShaderError("range() step must be a constant int > 0")
+            else:
+                raise ShaderError("range() must have 1, 2 or 3 args.")
+            self._stack.append("range")
+            # nothing to emit yet
         else:
             assert isinstance(func, str)
             self.emit(op.co_call, nargs)
@@ -396,25 +739,276 @@ class PyBytecode2Bytecode:
         self._stack.pop()
         self._stack.pop()
         self._stack.append(None)
-        self.emit(op.co_binop, "add")
+        self.emit(op.co_binary_op, "add")
 
     def _op_binary_subtract(self):
         self._next()
         self._stack.pop()
         self._stack.pop()
         self._stack.append(None)
-        self.emit(op.co_binop, "sub")
+        self.emit(op.co_binary_op, "sub")
 
     def _op_binary_multiply(self):
         self._next()
         self._stack.pop()
         self._stack.pop()
         self._stack.append(None)
-        self.emit(op.co_binop, "mul")
+        self.emit(op.co_binary_op, "mul")
 
     def _op_binary_true_divide(self):
         self._next()
         self._stack.pop()
         self._stack.pop()
         self._stack.append(None)
-        self.emit(op.co_binop, "div")
+        self.emit(op.co_binary_op, "div")
+
+    def _op_binary_power(self):
+        self._next()
+        exp = self._stack.pop()
+        self._stack.pop()  # base
+        self._stack.append(None)
+        if exp == 2:  # shortcut
+            self.emit(op.co_pop_top)
+            self.emit(op.co_dup_top)
+            self.emit(op.co_binary_op, "mul")
+        else:
+            self.emit(op.co_binary_op, "pow")
+
+    def _op_binary_modulo(self):
+        self._next()
+        self._stack.pop()
+        self._stack.pop()
+        self._stack.append(None)
+        self.emit(op.co_binary_op, "mod")
+
+    def _op_compare_op(self):
+        cmp = cmp_op[self._next()]
+        if cmp not in ("<", "<=", "==", "!=", ">", ">="):
+            raise ShaderError(f"Compare op {cmp} not supported in shaders.")
+        self._stack.pop()
+        self._stack.pop()
+        self._stack.append(None)
+        self.emit(op.co_compare, cmp)
+
+    def _op_jump_absolute(self):
+        target = self._next()
+        label = self._get_label(target)
+        if label.startswith("Lm") and self._opcodes[-1][0] == "co_pop_top":
+            # This is a break in Python 3.8+ - I think it pops the iterator
+            self._opcodes.pop(-1)
+        self.emit(op.co_branch, label)
+
+    def _op_jump_forward(self):
+        delta = self._next()
+        target = self._pointer + delta
+        if self._opcodes[-1][0].startswith("co_branch"):
+            # Is this a Python bug? Below is a snippet of seen Python bytecode.
+            # There are no jumps to 28. Maybe there *could* be? If so, we would
+            # emit a co_label, and this IF wouldn't triger (and all is well).
+            # 26 JUMP_ABSOLUTE           14
+            # 28 JUMP_FORWARD            10 (to 40)
+            return
+        self.emit(op.co_branch, self._get_label(target))
+
+    def _op_pop_jump_if_false(self):
+        target = self._next()
+        condition = self._stack.pop()  # noqa
+        self.emit(
+            op.co_branch_conditional,
+            self._get_label(self._pointer),
+            self._get_label(target),
+        )
+        # todo: spirv supports hints on what branch is the most likely
+
+    def _op_pop_jump_if_true(self):
+        target = self._next()
+        condition = self._stack.pop()  # noqa
+        self.emit(
+            op.co_branch_conditional,
+            self._get_label(target),
+            self._get_label(self._pointer),
+        )
+
+    def _op_jump_if_true_or_pop(self):
+        # This is xx OR yy, but only when a result is needed
+        # So not inside ``if xx or yy:``, but in ``if bool(xx or yy):``
+
+        # The xx is now on the stack. In the next instructions yy will be
+        # pushed on the stack, and at target, we continue. That's where we
+        # need to insert the OR.
+
+        # target = self._next()
+        # self._insert_at[target] = ("co_binary_op", "or")
+
+        # ... except that determining if an arbitrary object is true
+        # or false is not trivial. We could add something like co_bool,
+        # but maybe we should avoid that temptation, as it does not fit
+        # a strongly typed language well ...
+        raise ShaderError(
+            "Implicit bool conversions not supported. Maybe use ``x if y else z``?"
+        )
+
+    def _op_jump_if_false_or_pop(self):
+        # Same as _op_jump_if_true_or_pop, but for AND
+        # target = self._next()
+        # self._insert_at[target] = ("co_binary_op", "and")
+        raise ShaderError(
+            "Implicit bool conversions not supported. Maybe use ``x if y else z``?"
+        )
+
+    def _start_loop(self, loop_info):
+
+        # This gets called right before the first instruction of the loop
+        # gets processed. We need to emit some loop-related code here.
+
+        self._loop_stack.append(loop_info)
+
+        if loop_info["type"] == "for":
+            # Check that the range is set
+            if not loop_info.get("range_is_set"):
+                raise ShaderError("Shader for-loop must use range()")
+
+            # Consume next codepoint - the storing of the iter value
+            assert dis.opname[self._co.co_code[self._pointer]] == "FOR_ITER"
+            assert dis.opname[self._co.co_code[self._pointer + 2]] == "STORE_FAST"
+            iter_name_index = self._co.co_code[self._pointer + 2 + 1]
+            iter_name = self._co.co_varnames[iter_name_index]
+            loop_info["iter_name"] = iter_name
+
+            # Block 0 (the current block) - prepare iter variable
+            # Note that in the range() call, we've put three variables on the stack
+            self.emit(op.co_store_name, iter_name + "-step")
+            self.emit(op.co_store_name, iter_name + "-stop")
+            self.emit(op.co_store_name, iter_name + "-start")
+            self.emit(op.co_load_name, iter_name + "-start")
+            self.emit(op.co_store_name, iter_name)
+            self.emit(op.co_branch, loop_info["header_label"])
+            # Block 1 - the "header" of the loop
+            self.emit(op.co_label, loop_info["header_label"])
+            self.emit(
+                op.co_branch_loop,
+                loop_info["iter_label"],
+                loop_info["continue_label"],
+                loop_info["merge_label"],
+            )
+            # Block 2 - the block that decides whether to break from the loop
+            self.emit(op.co_label, loop_info["iter_label"])
+            self.emit(op.co_load_name, iter_name)
+            self.emit(op.co_load_name, iter_name + "-stop")
+            self.emit(op.co_compare, "<")
+            self.emit(
+                op.co_branch_conditional,
+                loop_info["body_label"],
+                loop_info["merge_label"],
+            )
+            # Block 3 - the body (can consist of more blocks)
+            self.emit(op.co_label, loop_info["body_label"])
+            # ... the body is what gets processed next
+            # The continue_label and merge_label get emitted in _end_loop
+
+        elif loop_info["type"] == "while":
+
+            # Block 0 - the current block
+            self.emit(op.co_branch, loop_info["header_label"])
+            # Block 1 - the "header" of the loop
+            self.emit(op.co_label, loop_info["header_label"])
+            self.emit(
+                op.co_branch_loop,
+                loop_info["iter_label"],
+                loop_info["continue_label"],
+                loop_info["merge_label"],
+            )
+            # Block 2 - the block that decides whether to break from the loop
+            self.emit(op.co_label, loop_info["iter_label"])
+            if loop_info["first_jump_is_to_end"]:
+                # The self._labels[target] = loop_info["body_label"] has been applied,
+                # so the body label (and the branch to it) get generated as we go.
+                pass
+            else:
+                self.emit(op.co_load_constant, True)
+                self.emit(
+                    op.co_branch_conditional,
+                    loop_info["body_label"],
+                    loop_info["merge_label"],
+                )
+                self.emit(op.co_label, loop_info["body_label"])
+            # The continue_label and merge_label get emitted in _end_loop
+
+        else:
+            raise RuntimeError(f"invalid loop type {loop_info['type'] }")
+
+    def _end_loop(self):
+
+        # This gets called right before the first instruction after the loop.
+        # We need to emit some instructions to close up the loop.
+
+        loop_info = self._loop_stack.pop(-1)
+
+        if loop_info["type"] == "for":
+            # For-loop: this is where the iter value is incremented.
+            iter_name = loop_info["iter_name"]
+            self.emit(op.co_label, loop_info["continue_label"])
+            self.emit(op.co_load_name, iter_name)
+            self.emit(op.co_load_name, iter_name + "-step")
+            self.emit(op.co_binary_op, "add")
+            self.emit(op.co_store_name, iter_name)
+            self.emit(op.co_branch, loop_info["header_label"])
+            self.emit(op.co_label, loop_info["merge_label"])
+        else:
+            # While-loop: just jump to the header. We add two no-op instruction
+            # to avoid the branch from being collapsed by our fix_empty_blocks()
+            # Note that this does not cause any SPIRV code (except
+            # perhaps an unused definition of a constant 0.0)
+            self.emit(op.co_label, loop_info["continue_label"])
+            self.emit(op.co_branch, loop_info["header_label"])
+            self.emit(op.co_label, loop_info["merge_label"])
+
+    def _op_setup_loop(self):
+        # This is Python < 2.8 indicating that there is a loop coming. We don't use it.
+        delta = self._next()
+        self._pointer + delta
+        assert self._loops_to_handle[0]["end"]
+
+    def _op_break_loop(self):
+        # Python < 2.8
+        self._next()
+        self.emit(op.co_branch, self._loop_stack[-1]["merge_label"])
+
+    def _op_continue_loop(self):
+        # This bytecode op is present in Python < 2.8, but does not seem to be
+        # used in 2.6 and 2.7 either ...
+        target1 = self._next()  # for-iter
+        target2 = self._loop_stack[-1]["continue_label"]
+        assert target1 == target2
+        self.emit(op.co_branch, target2)
+
+    def _op_get_iter(self):
+        self._next()
+        func = self._stack.pop()
+        if func != "range":
+            raise ShaderError("Can only use a loop with range()")
+        self._stack.append(func)
+        # Note: in op_call_function we've already made sure that there are three arg values on the stack
+
+    def _op_for_iter(self):
+        # This is the start of a for-loop, but we don't trigger using the method,
+        # because our logic needs to take while-loops into account too.
+        # But we can do some checks for good measure :)
+
+        delta = self._next()
+        target = self._pointer + delta
+        here = self._pointer - 2
+
+        next_op = self._next()  # STORE_FAST
+        next_val = self._next()  # iter variable name
+
+        loop_info = self._loop_stack[-1]
+
+        assert here == loop_info["start"]
+        assert target in (loop_info["end"], loop_info["end"] - 2)
+        assert dis.opname[next_op] == "STORE_FAST"
+        assert self._co.co_varnames[next_val] == loop_info["iter_name"]
+
+    def _op_pop_block(self):
+        # We already handle this block by our loop handling, ignoring here.
+        self._next()

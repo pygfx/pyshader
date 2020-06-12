@@ -192,3 +192,79 @@ void main() {
 }
 """
 )
+
+# %% If statements
+
+print_glsl2spirv_comp(
+    """
+#version 450
+//layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer PrimeIndices {
+    uint[] data;
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index == 1) {
+        data[index] = 41;
+    } else if (index == 2) {
+        data[index] = 42;
+    } else if (index == 3) {
+        data[index] = 43;
+    } else {
+        data[index] = index;
+    }
+}
+"""
+)
+
+# %% for-loop
+
+print_glsl2spirv_comp(
+    """
+#version 450
+//layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer PrimeIndices {
+    uint[] data;
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint val = 0;
+    for (int i=0; i<index; i++) {
+        if (i == 4) { continue; }
+        if (i == 7) { break; }
+        val = val + 1;
+    }
+    data[index] = val;
+}
+"""
+)
+
+# %% while-loop
+
+print_glsl2spirv_comp(
+    """
+#version 450
+//layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer PrimeIndices {
+    uint[] data;
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint val = 0;
+    uint i = 0;
+    while (true) {
+        i += 1;
+        if (index == 4) { continue; }
+        if (i == 7) { break; }
+        val = val + 2;
+    }
+    data[index] = val;
+}
+"""
+)

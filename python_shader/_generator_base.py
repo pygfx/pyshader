@@ -165,6 +165,7 @@ class WordPlaceholder:
     """
 
     def __init__(self, initial_value):
+        assert isinstance(initial_value, (int, bytes))
         self.value = initial_value
 
     def __repr__(self):
@@ -195,7 +196,7 @@ class BaseSpirVGenerator:
     def _convert(self, input):
         """ Subclasses should implement this.
         """
-        raise NotImplementedError()
+        raise NotImplementedError()  # noqa
 
     def _init(self):
 
@@ -287,10 +288,7 @@ class BaseSpirVGenerator:
         insert_point = -1
         for i in range(len(func_instructions)):
             if func_instructions[i][0] == cc.OpFunction:
-                insert_point = -1
-            elif insert_point < 0:
-                if func_instructions[i][0] == cc.OpLabel:
-                    insert_point = i + 1
+                insert_point = i + 2
             elif func_instructions[i][0] == cc.OpVariable:
                 func_instructions.insert(insert_point, func_instructions.pop(i))
                 insert_point += 1
@@ -338,7 +336,13 @@ class BaseSpirVGenerator:
                 for i in instruction[1:]:
                     if isinstance(i, AnyId):
                         i_str = i.display_name
-                        if instruction[0] == cc.OpDecorate:
+                        if instruction[0] in (
+                            cc.OpDecorate,
+                            cc.OpLoopMerge,
+                            cc.OpSelectionMerge,
+                            cc.OpBranch,
+                            cc.OpBranchConditional,
+                        ):
                             pass
                         elif i.id not in seen_ids:
                             seen_ids.add(i.id)
@@ -433,13 +437,13 @@ class BaseSpirVGenerator:
             M = {"f32": "<f", "f64": "<d"}
             struct_type = M[the_type.__name__]
             bb = struct.pack(struct_type, value)
+        elif isinstance(value, bool):  # test before int because issubclass(bool, int)
+            the_type = _types.boolean
         elif isinstance(value, int):
             the_type = _types.i32 if the_type is None else the_type
             M = {"u8": "<B", "i16": "<h", "i32": "<i", "i64": "<q"}
             struct_type = M[the_type.__name__]
             bb = struct.pack(struct_type, value)
-        elif isinstance(value, bool):
-            the_type = _types.boolean
         else:
             raise RuntimeError(f"Cannot get a constant for {value}")
         # Make sure that we have it

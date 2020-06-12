@@ -67,6 +67,12 @@ class OpCodeDefinitions:
         """
         raise NotImplementedError()
 
+    def co_return(self):
+        """ Return from a function. When the function is a fragment shader
+        entrypoint, this means discard.
+        """
+        raise NotImplementedError()
+
     def co_call(self, nargs):
         """ Call a function. WIP
         """
@@ -82,6 +88,16 @@ class OpCodeDefinitions:
 
     def co_pop_top(self):
         """ Pop the top of the stack.
+        """
+        raise NotImplementedError()
+
+    def co_dup_top(self):
+        """ Duplicate the top of the stack.
+        """
+        raise NotImplementedError()
+
+    def co_rot_two(self):
+        """ Swap the two top elements on the stack.
         """
         raise NotImplementedError()
 
@@ -123,8 +139,52 @@ class OpCodeDefinitions:
         """
         raise NotImplementedError()
 
-    def co_binop(self, op):
+    def co_binary_op(self, op):
         """ Implements TOS = TOS1 ?? TOS, where ?? is the given operation,
-        which can be: add, sub, mul, div, ...
+        which can be: add, sub, mul, div, and, or, ...
+        """
+        raise NotImplementedError()
+
+    def co_unary_op(self, op):
+        """ A unary operation: neg, not.
+        """
+        raise NotImplementedError()
+
+    def co_compare(self, cmp):
+        """ Comparison operation. cmp can be "<", "<=", "==", "!=", ">", ">=".
+        """
+        raise NotImplementedError()
+
+    def co_label(self, label):
+        """ Start a block with the given label.
+        The label must be a unique int or string.
+        """
+        raise NotImplementedError()
+
+    def co_branch(self, label):
+        """ Branch to the target label.
+        """
+        raise NotImplementedError()
+
+    def co_branch_conditional(self, true_label, false_label):
+        """ Branch to true_label if TOS is True, else branch to false_label.
+
+        The control flow of the bytecode must be such that for each
+        pair of branches there is a unique label where they merge and
+        where no other branches pass through. The exception is that a
+        branch-pair, and their sub-branches (and theirs, etc.) can merge
+        at the same label (the compiler can resolve this).
+        """
+        raise NotImplementedError()
+
+    def co_branch_loop(self, iter_label, continue_label, merge_label):
+        """ Indicate the beginning of a loop (in a new block).
+        """
+        raise NotImplementedError()
+
+    def co_select(self):
+        """ Select between two values based on a bool.
+        If TOS3, select TOS2, otherwise select TOS1. Push
+        the selected object on the stack.
         """
         raise NotImplementedError()
