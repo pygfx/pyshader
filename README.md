@@ -1,5 +1,4 @@
-[![Build Status](https://dev.azure.com/almarklein/pyshader/_apis/build/status/almarklein.pyshader?branchName=master)](https://dev.azure.com/almarklein/pyshader/_build/latest?definitionId=5&branchName=master)
-
+![CI status](https://github.com/pygfx/pyshader/workflows/CI/badge.svg)
 
 # pyshader
 
@@ -14,7 +13,7 @@ is a binary platform independent represenation for GPU shaders. This module
 makes it easier to write SpirV shaders in Python.
 
 This should be useful for anything built on top of
-[wgpu-py](https://github.com/almarklein/wgpu-py).
+[wgpu-py](https://github.com/pygfx/wgpu-py).
 
 
 ## Current status
@@ -196,6 +195,6 @@ the elements of a vector:
 
 #### Examples
 
-Checkout the Python shader examples to learn more:
+Check out the Python shader examples to learn more:
 https://github.com/pygfx/pyshader/tree/master/examples_py
 
