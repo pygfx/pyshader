@@ -9,17 +9,58 @@ start with.
 ## Introduction
 
 [SpirV](https://en.wikipedia.org/wiki/Standard_Portable_Intermediate_Representation)
-is a binary platform independent represenation for GPU shaders. This module
+is a binary platform-independent represenation for GPU shaders. This module
 makes it easier to write SpirV shaders in Python.
 
 This should be useful for anything built on top of
 [wgpu-py](https://github.com/pygfx/wgpu-py).
 
 
+## Scope
+
+The main idea is that end-users can use pyshader to transform a certain
+shader representation into another. E.g. Python into SpirV.
+
+Under the hood, pyshader is a micro compiler-framework featuring its
+own intermediate representation (IR). Different "front-ends" could
+target this IR, and the IR could be compiled to other targets than SpirV.
+
+At the moment, the only available compile step is from a Python
+function to SpirV. More paths may be added in the future, e.g.
+[WGSL](https://gpuweb.github.io/gpuweb/wgsl.html).
+
+
+## Running Python on the GPU? This is crazy!
+
+Perhaps, but there are certain advantages:
+
+* Other Python libraries that target the GPU struggle with re-using
+  code between shaders. Projects either
+  [use a weird form of string templating](https://github.com/almarklein/visvis)
+  or design an [overly complex templating engine](https://github.com/vispy/vispy/).
+  Disclamer, I am (partly) responsible for both of these examples. Anyway,
+  if you can simply use Python functions that can call each-other, that
+  makes things a lot easier.
+* Writing shaders in GLSL means that the shaders need to be compiled to
+  SpirV, which means either end-users need the Lunar SDK, or you need to
+  ship pre-compiled shaders. This complicates distribution.
+* It's simply cool that you can write a shader in Python :)
+
+
+> But Almar, you tried compiling Python to JavaScript in [PScript](https://github.com/flexxui/pscript),
+and that approach does not scale well because what you write is really ... JS *shiver*.
+
+I believe it's different with PyShader for two main reasons: Firstly, pyshader
+always remains limited to the use of shaders, which are generally small. Secondly,
+pyshader is strongly typed, targeting a representation that's close to machine code.
+If your code compiles, it'll probably just do what you mean.
+
+
 ## Current status
 
-Very much a WIP. The `python2shader` compiler is working, but is missing
-functionality for e.g. if-statements and for-loops.
+Consider this alpha. The `python2shader` compiler is working and relatively
+complete, but error messages may be cryptic, and the documentation may need
+some love.
 
 
 ## Installation
@@ -63,13 +104,6 @@ This code is distributed under the 2-clause BSD license.
 
 
 ## API
-
-The pyshader lib is a mini-framework allowing compilation from/to different
-shader representations. It features an internal bytecode representation
-(not (yet) part of the public API). At the moment, the only compilation part
-is from a Python function, to bytecode, to SpirV. More paths may be added
-in the future, e.g. [WGSL](https://gpuweb.github.io/gpuweb/wgsl.html).
-
 
 ### The `ShaderModule` class
 
@@ -135,7 +169,7 @@ or "fragment", to indicate the type of shader.
 
 Each argument of your function must be annotated with a 3-element tuple:
 
-```
+```py
 @python2shader
 def your_vertex_shader(
     argument_name: (resource_type, slot, type_info)
@@ -192,6 +226,13 @@ the elements of a vector:
     v3 = v.xzz
     scalar = v.y
 ```
+
+#### Available functions
+
+Pyshader features an [stdlib](https://github.com/pygfx/pyshader/blob/master/pyshader/stdlib.py)
+containing many common shader operations. Many functions from the math module can also
+be used: e.g. `math.sin()`.
+
 
 #### Examples
 
