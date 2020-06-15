@@ -231,6 +231,27 @@ def test_cast_ivec2_bvec2():
     assert iters_equal(out[1], values2)
 
 
+def test_abstract_types():
+    # This triggers the per-element vector conversion
+    @python2shader_and_validate
+    def compute_shader(
+        index: ("input", "GlobalInvocationId", i32),
+        data1: ("buffer", 0, Array(ivec2)),
+        data2: ("buffer", 1, Array(vec2)),
+    ):
+        a = data1[index]
+        data2[index] = Vector(2, f32)(a)
+
+    skip_if_no_wgpu()
+
+    values1 = [-999999, -100, 0, 1, 4, 100, 32767, 32760, 0, 999999]
+
+    inp_arrays = {0: (ctypes.c_int32 * len(values1))(*values1)}
+    out_arrays = {1: ctypes.c_float * len(values1)}
+    out = compute_with_buffers(inp_arrays, out_arrays, compute_shader, n=5)
+    assert iters_equal(out[1], values1)
+
+
 # %% Utils for this module
 
 
@@ -247,17 +268,18 @@ def skip_if_no_wgpu():
 
 
 HASHES = {
-    "test_cast_i32_f32.compute_shader": ("80299a1637022c68", "c8b89c7a3be45738"),
-    "test_cast_u8_f32.compute_shader": ("d713f213a5844ce5", "a40fd335675cf868"),
-    "test_cast_f32_i32.compute_shader": ("5b7b53e36fbd0a53", "ac7437359946a691"),
-    "test_cast_f32_f32.compute_shader": ("ac51446f26da2ece", "5753fa9dde151f3f"),
-    "test_cast_f32_f64.compute_shader": ("54e39ca6cee79080", "7653c236a8c69ac8"),
-    "test_cast_i64_i16.compute_shader": ("98c624bdac82fee1", "f1fbaeb20d9d021e"),
-    "test_cast_i16_u8.compute_shader": ("59ebd918fd1aa309", "19bc9aaed0e9cf09"),
-    "test_cast_vec_ivec2_vec2.compute_shader": ("a931ea5daaf91785", "dc4ff85d648045e3"),
-    "test_cast_vec_any_vec4.compute_shader": ("299d0362aaf7b891", "44bd6b015b3d9667"),
-    "test_cast_vec_ivec3_vec3.compute_shader": ("a15d164c451a3a9f", "5d988118bd2952ab"),
-    "test_cast_ivec2_bvec2.compute_shader": ("3b09730bf55bbfef", "f1824ce347d142e0"),
+    "test_cast_i32_f32.compute_shader": ("f27e143f69e3c639", "c8b89c7a3be45738"),
+    "test_cast_u8_f32.compute_shader": ("ce8c067f25b7f08e", "a40fd335675cf868"),
+    "test_cast_f32_i32.compute_shader": ("eb0e056c35fdfe8a", "ac7437359946a691"),
+    "test_cast_f32_f32.compute_shader": ("cde5b6a2e2843093", "5753fa9dde151f3f"),
+    "test_cast_f32_f64.compute_shader": ("af1ad9a7d4e30354", "7653c236a8c69ac8"),
+    "test_cast_i64_i16.compute_shader": ("10c505c2b17eacbd", "f1fbaeb20d9d021e"),
+    "test_cast_i16_u8.compute_shader": ("6e8194a9404d6144", "19bc9aaed0e9cf09"),
+    "test_cast_vec_ivec2_vec2.compute_shader": ("bc7939af856f30b9", "dc4ff85d648045e3"),
+    "test_cast_vec_any_vec4.compute_shader": ("56f57a24e6f7b1f0", "44bd6b015b3d9667"),
+    "test_cast_vec_ivec3_vec3.compute_shader": ("1232037d61589e28", "5d988118bd2952ab"),
+    "test_cast_ivec2_bvec2.compute_shader": ("5dde79b57409789e", "f1824ce347d142e0"),
+    "test_abstract_types.compute_shader": ("1f162c00b2a27ff3", "3d34e8037aafe3af"),
 }
 
 if __name__ == "__main__":
