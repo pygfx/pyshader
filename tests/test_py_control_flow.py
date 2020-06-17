@@ -14,7 +14,7 @@ import wgpu.backends.rs  # noqa
 from wgpu.utils import compute_with_buffers
 
 import pytest
-from testutils import can_use_wgpu_lib
+from testutils import can_use_wgpu_lib, can_use_vulkan_sdk
 from testutils import validate_module, run_test_and_print_new_hashes
 
 
@@ -616,7 +616,7 @@ def test_while6():
     assert res == [0, 3, 3, 3, 6, 6, 6, 9, 9, 9]
 
 
-# %% discard
+# %% more
 
 
 def test_discard():
@@ -630,7 +630,50 @@ def test_discard():
         out_color = vec4(1.0, 0.0, 0.0, 1.0)  # noqa - shader output
 
     assert ("co_return",) in fragment_shader.to_bytecode()
-    assert "OpKill" in fragment_shader.gen.to_text()
+
+    if can_use_vulkan_sdk:
+        spirv_text = pyshader.dev.disassemble(fragment_shader.to_spirv())
+        assert "OpKill" in spirv_text
+
+
+def test_long_bytecode():
+    # avoid regressions like issue #42
+    @python2shader_and_validate
+    def compute_shader(
+        index=("input", "GlobalInvocationId", i32), data2=("buffer", 1, Array(f32)),
+    ):
+        if index < 2:
+            a = 3 + 4
+            b = a + 5
+            c = a + b + 6
+            d = a + b + c + 7
+            e = a + b + c + d + 8 - 3  # 100
+            data2[index] = f32(e - 60)
+        elif index < 4:
+            a = 3 + 4
+            b = a + 5
+            c = a + b + 6
+            d = a + b + c + 7
+            e = a + b + c + d + 8 - 3  # 100
+            data2[index] = f32(e - 59)
+        elif index < 8:
+            a = 3 + 4
+            b = a + 5
+            c = a + b + 6
+            d = a + b + c + 7
+            e = a + b + c + d + 8 - 3  # 100
+            data2[index] = f32(e - 58)
+        else:
+            a = 3 + 4
+            b = a + 5
+            c = a + b + 6
+            d = a + b + c + 7
+            e = a + b + c + d + 8 - 3  # 100
+            data2[index] = f32(e - 57)
+
+    skip_if_no_wgpu()
+    res = generate_list_of_floats_from_shader(10, compute_shader)
+    assert res == [40, 40, 41, 41, 42, 42, 42, 42, 43, 43]
 
 
 # %% Utils for this module
@@ -678,6 +721,7 @@ HASHES = {
     "test_while5.compute_shader": ("5f4ce5e00ffe6fb4", "d9324dc099327352"),
     "test_while6.compute_shader": ("bf0b39432c31e8a5", "e89fc46e244b6d42"),
     "test_discard.fragment_shader": ("bbdaa8848a180860", "6d3182b0b5189d45"),
+    "test_long_bytecode.compute_shader": ("0126f7716c3d09aa", "c427f79643c9407c"),
 }
 
 
