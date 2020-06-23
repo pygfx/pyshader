@@ -99,8 +99,14 @@ class OpCodeDefinitions:
         """
         raise NotImplementedError()
 
-    def co_rot_two(self):
-        """ Swap the two top elements on the stack.
+    def co_rotate_stack(self, n):
+        """ Rotate the top n elements on the stack, moving the top item
+        to the nth position.
+        """
+        raise NotImplementedError()
+
+    def co_reverse_stack(self, n):
+        """ Reverse the top n elements on the stack.
         """
         raise NotImplementedError()
 
@@ -145,7 +151,7 @@ class OpCodeDefinitions:
 
     def co_binary_op(self, op):
         """ Implements TOS = TOS1 ?? TOS, where ?? is the given operation,
-        which can be: add, sub, mul, div, and, or, ...
+        which can be: add, sub, mul, div, fdiv, idiv, and, or, ...
         """
         raise NotImplementedError()
 

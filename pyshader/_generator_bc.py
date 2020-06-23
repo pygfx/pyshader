@@ -149,28 +149,21 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
 
         # Define entry points
         # Note that we must add the ids of all used OpVariables that this entrypoint uses.
-        entry_point_id = self.obtain_id(name)
+        self._entry_point_id = entry_point_id = self.obtain_id(name)
         self.gen_instruction(
             "entry_points", cc.OpEntryPoint, execution_model_flag, entry_point_id, name
         )
 
         # Define execution modes for each entry point
         assert isinstance(execution_modes, dict)
-        modes = execution_modes.copy()
+        self._execution_modes.update(execution_modes)
+        modes = self._execution_modes
         if execution_model_flag == cc.ExecutionModel_Fragment:
             if "OriginLowerLeft" not in modes and "OriginUpperLeft" not in modes:
                 modes["OriginLowerLeft"] = []
         if execution_model_flag == cc.ExecutionModel_GLCompute:
             if "LocalSize" not in modes:
                 modes["LocalSize"] = [1, 1, 1]
-        for mode_name, mode_args in modes.items():
-            self.gen_instruction(
-                "execution_modes",
-                cc.OpExecutionMode,
-                entry_point_id,
-                getattr(cc, "ExecutionMode_" + mode_name),
-                *mode_args,
-            )
 
         # Declare funcion
         return_type_id = self.obtain_type_id(_types.void)
@@ -398,6 +391,25 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
                 nr = 45
             else:
                 raise ShaderError("clamp() expects (vector of) int or float.")
+        elif funcname == "mix":
+            nargs = 3
+            nr = 46
+            result_type = ty = args[0].type
+            if issubclass(ty, _types.Float):
+                pass
+            elif issubclass(ty, _types.Vector) and issubclass(ty.subtype, _types.Float):
+                if issubclass(args[2].type, _types.Float):
+                    # Support mix(x, y, a) with X and Y vectors, and A a float
+                    result_id, vector_type_id = self.obtain_value(ty)
+                    self.gen_func_instruction(
+                        cc.OpCompositeConstruct,
+                        vector_type_id,
+                        result_id,
+                        *[args[2]] * ty.length,
+                    )
+                    args[2] = result_id
+            else:
+                raise ShaderError("mix() expects (vector of) float.")
         else:
             raise RuntimeError(f"Unknown extension instruction {funcname}")
 
@@ -598,6 +610,8 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
             )
         elif isinstance(slot, str):
             # Builtin input or output
+            if slot == "FragDepth":
+                self._execution_modes["DepthReplacing"] = []
             try:
                 slot = cc.builtins[slot]
             except KeyError:
@@ -664,11 +678,15 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         self._stack.append(ob)
         self._stack.append(ob)
 
-    def co_rot_two(self):
-        ob1 = self._stack.pop()
-        ob2 = self._stack.pop()
-        self._stack.append(ob1)
-        self._stack.append(ob2)
+    def co_rotate_stack(self, n):
+        obs = [self._stack.pop() for i in range(n)]
+        obs.append(obs.pop(0))
+        obs.reverse()
+        self._stack.extend(obs)
+
+    def co_reverse_stack(self, n):
+        obs = [self._stack.pop() for i in range(n)]
+        self._stack.extend(obs)
 
     def co_load_name(self, name):
         # store a variable that is used in an inner scope.
@@ -861,7 +879,7 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
             reftype1 = type1.subtype
         tn1 = type1.__name__
 
-        # Determind opcode and check types
+        # Determine opcode and check types
         if op == "neg":
             if issubclass(reftype1, _types.Float):
                 opcode = cc.OpFNegate
@@ -889,11 +907,27 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         id1, id2 = val1, val2
 
         # Predefine some types
+        # We specify three flavors of div: One that works for both int and float,
+        # one that works for float only, and one that works for int only.
         scalar_or_vector = _types.Scalar, _types.Vector
         FOPS = dict(
-            add=cc.OpFAdd, sub=cc.OpFSub, mul=cc.OpFMul, div=cc.OpFDiv, mod=cc.OpFMod
+            add=cc.OpFAdd,
+            sub=cc.OpFSub,
+            mul=cc.OpFMul,
+            fdiv=cc.OpFDiv,
+            div=cc.OpFDiv,
+            mod=cc.OpFMod,
+            rem=cc.OpFRem,
         )
-        IOPS = dict(add=cc.OpIAdd, sub=cc.OpISub, mul=cc.OpIMul, mod=cc.OpSMod)
+        IOPS = dict(
+            add=cc.OpIAdd,
+            sub=cc.OpISub,
+            mul=cc.OpIMul,
+            idiv=cc.OpSDiv,
+            div=cc.OpSDiv,
+            mod=cc.OpSMod,
+            rem=cc.OpSRem,
+        )
         LOPS = {"and": cc.OpLogicalAnd, "or": cc.OpLogicalOr}
 
         # Get reference types

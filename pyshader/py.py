@@ -535,6 +535,27 @@ class PyBytecode2Bytecode:
         self._stack_pop()
         self.emit(op.co_pop_top)
 
+    def _op_rot_two(self, arg):
+        ob1 = self._stack_pop()
+        ob2 = self._stack_pop()
+        self._stack.extend([ob1, ob2])
+        self.emit(op.co_reverse_stack, 2)  # rotate and reverse are same for n = 2
+
+    def _op_rot_three(self, arg):
+        ob1 = self._stack_pop()
+        ob2 = self._stack_pop()
+        ob3 = self._stack_pop()
+        self._stack.extend([ob1, ob3, ob2])
+        self.emit(op.co_rotate_stack, 3)
+
+    def _op_rot_four(self, arg):  # py 3.8+
+        ob1 = self._stack_pop()
+        ob2 = self._stack_pop()
+        ob3 = self._stack_pop()
+        ob4 = self._stack_pop()
+        self._stack.extend([ob1, ob4, ob3, ob2])
+        self.emit(op.co_rotate_stack, 4)
+
     def _op_return_value(self, arg):
         result = self._stack_pop()
         assert result is None
@@ -594,6 +615,18 @@ class PyBytecode2Bytecode:
         if isinstance(ob, (float, int, bool)):
             self.emit(op.co_load_constant, ob)
             self._stack.append(ob)
+        elif isinstance(ob, tuple):
+            if self._peek() != "UNPACK_SEQUENCE":
+                raise ShaderError(
+                    "Const tuples are not supported (though you can do `a, b = c, d`)"
+                )
+            for x in ob:
+                if isinstance(x, (float, int, bool)):
+                    self.emit(op.co_load_constant, x)
+                    self._stack.append(x)
+                else:
+                    raise ShaderError("Only float/int/bool constants supported.")
+            self._stack.append(("tuple", len(ob)))  # signal for UNPACK_SEQUENCE
         elif ob is None:
             self._stack.append(None)  # Probably for the function return value
         else:
@@ -649,6 +682,8 @@ class PyBytecode2Bytecode:
             if isinstance(ob, float):
                 self.emit(op.co_load_constant, ob)  # e.g. math.pi
                 self._stack.append(None)
+            elif name == "fmod":
+                self._stack.append(".py.rem")  # new global on the stack
             elif name in stdlib_func_names:
                 self._stack.append(".stdlib." + name)  # new global on the stack
             else:
@@ -734,6 +769,10 @@ class PyBytecode2Bytecode:
             else:
                 self.emit(op.co_call, funcname, nargs)
                 self._stack.append(None)
+        elif func == ".py.rem":
+            assert nargs == 2
+            self.emit(op.co_binary_op, "rem")
+            self._stack.append(None)
         elif func == ".py.range":
             if not (
                 self._peek(self._pointer) == "GET_ITER"
@@ -745,7 +784,7 @@ class PyBytecode2Bytecode:
             loop_info["range_is_set"] = True
             if nargs == 1:
                 self.emit(op.co_load_constant, 0)
-                self.emit(op.co_rot_two)
+                self.emit(op.co_reverse_stack, 2)
                 self.emit(op.co_load_constant, 1)
             elif nargs == 2:
                 self.emit(op.co_load_constant, 1)
@@ -781,17 +820,28 @@ class PyBytecode2Bytecode:
         self.emit(op.co_store_index)
 
     def _op_build_tuple(self, n):
-        # todo: but I want to be able to do ``x, y = y, x`` !
-        raise ShaderError("No tuples in SpirV-ish Python yet")
-
-        res = [self._stack_pop() for i in range(n)]
-        res = tuple(reversed(res))
-
-        if dis.opname[self._peek()] == "BINARY_SUBSCR":
-            self._stack.append(res)
-            # No emit, in the SpirV bytecode we pop the subscript indices off the stack.
+        if self._peek() == "UNPACK_SEQUENCE":
+            # We don't actually build a tuple, but mark that the stack has the values
+            self._stack.append(("tuple", n))
         else:
-            raise ShaderError("Tuples are not supported.")
+            raise ShaderError(
+                "Tuples are not supported (though you can do `a, b = c, d`)"
+            )
+
+    def _op_unpack_sequence(self, n):
+        x = self._stack_pop()
+        if isinstance(x, tuple) and x and x[0] == "tuple":
+            # If the number of elements matches, we are all good
+            if x[1] == n:
+                self.emit(op.co_reverse_stack, n)
+                objects = [self._stack.pop() for i in range(n)]
+                self._stack.extend(objects)
+            else:
+                raise ShaderError(f"Cannot unpack a {x[1]} tuple into a {n}-tuple")
+        else:
+            raise ShaderError(
+                "Cannot unpack arbitrary sequences (though you can do `a, b = c, d`)"
+            )
 
     def _op_build_list(self, n):
         # Litaral list
@@ -807,29 +857,67 @@ class PyBytecode2Bytecode:
         # The version of BUILD_MAP specialized for constant keys. Py3.6+
         raise ShaderError("Dict not allowed in Shader-Python")
 
-    def _op_binary_add(self, arg):
+    def _op_unary_positive(self, arg):
+        self._stack_pop()
+        self._stack.append(None)
+        # this is a no-op
+
+    def _op_unary_negative(self, arg):
+        self._stack_pop()
+        self._stack.append(None)
+        self.emit(op.co_unary_op, "neg")
+
+    def _op_unary_not(self, arg):
+        self._stack_pop()
+        self._stack.append(None)
+        self.emit(op.co_unary_op, "not")
+
+    def _binary_op(self, binop):
         self._stack_pop()
         self._stack_pop()
         self._stack.append(None)
-        self.emit(op.co_binary_op, "add")
+        self.emit(op.co_binary_op, binop)
+
+    def _inplace_op(self, binop):
+        val = self._stack_pop()  # noqa
+        name = self._stack_pop()
+        self._stack.append(None)
+        assert isinstance(name, str)
+        self.emit(op.co_binary_op, binop)
+
+    def _op_inplace_add(self, arg):
+        self._inplace_op("add")
+
+    def _op_inplace_subtract(self, arg):
+        self._inplace_op("sub")
+
+    def _op_inplace_multiply(self, arg):
+        self._inplace_op("mul")
+
+    def _op_inplace_true_divide(self, arg):
+        self._inplace_op("fdiv")
+
+    def _op_inplace_floor_divide(self, arg):
+        self._inplace_op("idiv")
+
+    def _op_binary_add(self, arg):
+        self._binary_op("add")
 
     def _op_binary_subtract(self, arg):
-        self._stack_pop()
-        self._stack_pop()
-        self._stack.append(None)
-        self.emit(op.co_binary_op, "sub")
+        self._binary_op("sub")
 
     def _op_binary_multiply(self, arg):
-        self._stack_pop()
-        self._stack_pop()
-        self._stack.append(None)
-        self.emit(op.co_binary_op, "mul")
+        self._binary_op("mul")
 
     def _op_binary_true_divide(self, arg):
-        self._stack_pop()
-        self._stack_pop()
-        self._stack.append(None)
-        self.emit(op.co_binary_op, "div")
+        # We use the fdiv opcode that only works for floats. Python
+        # auto-converts ints to float when dividing. A shader does not.
+        # To avoid confusion, users have to use the normal division for
+        # floats, and the // division for ints.
+        self._binary_op("fdiv")
+
+    def _op_binary_floor_divide(self, arg):
+        self._binary_op("idiv")
 
     def _op_binary_power(self, arg):
         exp = self._stack_pop()
@@ -846,10 +934,7 @@ class PyBytecode2Bytecode:
             self.emit(op.co_call, "pow", 2)
 
     def _op_binary_modulo(self, arg):
-        self._stack_pop()
-        self._stack_pop()
-        self._stack.append(None)
-        self.emit(op.co_binary_op, "mod")
+        self._binary_op("mod")
 
     def _op_compare_op(self, arg):
         cmp = cmp_op[arg]

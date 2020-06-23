@@ -17,11 +17,18 @@ script to get new hashes when needed:
 
 """
 
+import ctypes
+
 import pyshader
 from pyshader import stdlib, f32, i32, vec2, vec3, vec4, ivec3, ivec4, Array
 
+import wgpu.backends.rs  # noqa
+from wgpu.utils import compute_with_buffers
+
+import pytest
 from pytest import mark, raises
-from testutils import can_use_vulkan_sdk, validate_module, run_test_and_print_new_hashes
+from testutils import can_use_vulkan_sdk, can_use_wgpu_lib
+from testutils import validate_module, run_test_and_print_new_hashes
 
 
 def test_null_shader():
@@ -134,6 +141,36 @@ def test_texcomp_2d_rg32i():
         tex.write(index.xy, color)
 
 
+def test_tuple_unpacking():
+    # Python implementations deal with tuple packing/unpacking differently.
+    # Python 3.8+ has rot_four, pypy3 resolves by changing the order of the
+    # store ops in the bytecode itself, and seems to even ditch unused variables.
+    @python2shader_and_validate_nobc
+    def compute_shader(
+        index: ("input", "GlobalInvocationId", i32),
+        data2: ("buffer", 1, "Array(vec2)"),
+    ):
+        i = f32(index)
+        a, b = 1.0, 2.0  # Cover Python storing this as a tuple const
+        c, d = a + i, b + 1.0
+        c, d = d, c
+        c += 100.0
+        c, d = d, c
+        c += 200.0
+        c, d, _ = c, d, 0.0  # 3-tuple
+        c, d, _, _ = c, d, 0.0, 0.0  # 4-tuple
+        c, d, _, _, _ = c, d, 0.0, 0.0, 0.0  # 5-tuple
+        data2[index] = vec2(c, d)
+
+    skip_if_no_wgpu()
+
+    out_arrays = {1: ctypes.c_float * 20}
+    out = compute_with_buffers({}, out_arrays, compute_shader, n=10)
+    res = list(out[1])
+    assert res[0::2] == [200 + i + 1 for i in range(10)]
+    assert res[1::2] == [100 + 3 for i in range(10)]
+
+
 # %% test fails
 
 
@@ -179,6 +216,29 @@ def test_cannot_call_non_funcs():
         pyshader.python2shader(compute_shader2)
 
 
+def test_cannot_use_tuples_in_other_ways():
+    def compute_shader1(index: ("input", "GlobalInvocationId", ivec3),):
+        v = 3.0, 4.0  # noqa
+
+    def compute_shader2(index: ("input", "GlobalInvocationId", ivec3),):
+        a = 3.0
+        b = 4.0
+        v = a, b  # noqa
+
+    def compute_shader3(index: ("input", "GlobalInvocationId", ivec3),):
+        v = vec2(3.0, 4.0)
+        a, b = v
+
+    with raises(pyshader.ShaderError):
+        pyshader.python2shader(compute_shader1)
+
+    with raises(pyshader.ShaderError):
+        pyshader.python2shader(compute_shader2)
+
+    with raises(pyshader.ShaderError):
+        pyshader.python2shader(compute_shader3)
+
+
 # %% Utils for this module
 
 
@@ -187,6 +247,18 @@ def python2shader_and_validate(func):
     assert m.input is func
     validate_module(m, HASHES)
     return m
+
+
+def python2shader_and_validate_nobc(func):
+    m = pyshader.python2shader(func)
+    assert m.input is func
+    validate_module(m, HASHES, check_bytecode=False)
+    return m
+
+
+def skip_if_no_wgpu():
+    if not can_use_wgpu_lib:
+        raise pytest.skip(msg="SpirV validated, but not run (cannot use wgpu)")
 
 
 HASHES = {
@@ -198,6 +270,7 @@ HASHES = {
     "test_texture_1d_i32.fragment_shader": ("0c1ad1a8f909c442", "7f4ad10ae75030fa"),
     "test_texture_3d_r16i.fragment_shader": ("f1069cfd9c74fa1d", "14f0b7e61c2ea4dc"),
     "test_texcomp_2d_rg32i.compute_shader": ("7dbaa7fe613cf33d", "609468500982bfbd"),
+    "test_tuple_unpacking.compute_shader": ("8ae5274a8ed79b8f", "f2c9aabaf35e6a24"),
 }
 
 
