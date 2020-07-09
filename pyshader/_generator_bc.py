@@ -838,14 +838,15 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
             self._stack.append(ac)
         elif issubclass(ob.type, _types.Vector):
             indices = []
+            # Wr support xyzw, rgba, stpq
             for c in name:
-                if c in "xr":
+                if c in "xrs":
                     indices.append(0)
-                elif c in "yg":
+                elif c in "ygt":
                     indices.append(1)
-                elif c in "zb":
+                elif c in "zbp":
                     indices.append(2)
-                elif c in "wa":
+                elif c in "waq":
                     indices.append(3)
                 else:
                     raise ShaderError(f"Invalid vector attribute {name}")
@@ -968,7 +969,14 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         elif type1 is type2 and issubclass(type1, scalar_or_vector):
             # Types are equal and scalar or vector. Covers a lot of cases.
             result_id, type_id = self.obtain_value(type1)
-            if issubclass(reftype1, _types.Float):
+            if (
+                issubclass(type1, _types.Vector)
+                and issubclass(reftype1, _types.Float)
+                and op == "mmul"
+            ):
+                opcode = cc.OpDot  # special case
+                result_id, type_id = self.obtain_value(type1.subtype)
+            elif issubclass(reftype1, _types.Float):
                 opcode = FOPS[op]
             elif issubclass(reftype1, _types.Int):
                 opcode = IOPS[op]
