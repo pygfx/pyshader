@@ -157,6 +157,38 @@ def test_copy_vec4():
     assert iters_equal(out[2][3::4], range(15))
 
 
+def test_array1():
+    @python2shader_and_validate
+    def compute_shader(
+        index: ("input", "GlobalInvocationId", ivec3),
+        data2: ("buffer", 0, Array(i32)),
+    ):
+        i = index.x
+        data1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        data2[i] = data1[i]
+
+    skip_if_no_wgpu()
+    out = compute_with_buffers({}, {0: (10, "i")}, compute_shader, n=10)
+    assert list(out[0]) == list(range(10))
+
+
+def test_array2():
+    @python2shader_and_validate
+    def compute_shader(
+        index: ("input", "GlobalInvocationId", ivec3),
+        data2: ("buffer", 0, Array(i32)),
+    ):
+        i = index.x
+        data1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        for j in range(10):
+            data1[j] = data1[j] * 2
+        data2[i] = data1[i]
+
+    skip_if_no_wgpu()
+    out = compute_with_buffers({}, {0: (10, "i")}, compute_shader, n=10)
+    assert list(out[0]) == list(range(0, 20, 2))
+
+
 # %% Utils for this module
 
 
@@ -177,6 +209,8 @@ HASHES = {
     "test_copy.compute_shader": ("7cf577981390626b", "47d2f371faa48ed0"),
     "test_copy_vec2.compute_shader": ("5e0bd906a652ec4a", "1b2df77b98a3f229"),
     "test_copy_vec4.compute_shader": ("243e410cd456593e", "3ba9a65801fb361a"),
+    "test_array1.compute_shader": ("cbc64b40fe63d646", "6bfd6c09ba142b2d"),
+    "test_array2.compute_shader": ("457ca294721bd18f", "222a47bf116e6e4d"),
 }
 
 

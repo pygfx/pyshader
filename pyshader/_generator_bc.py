@@ -92,12 +92,14 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         saved_in_blocks = {}  # name -> set of labels
         self._need_name_var_save = {}  # label -> set of names
         self._need_name_var_load = {}  # label -> set of names
+        name_store_count = {}
         for opcode, *args in bytecode:
             if opcode == "co_label":
                 cur_block_label = args[0]
             elif opcode == "co_store_name":
                 name = args[0]
                 saved_in_blocks.setdefault(name, set()).add(cur_block_label)
+                name_store_count[name] = name_store_count.get(name, 0) + 1
             elif opcode == "co_load_name":
                 name = args[0]
                 blocks_where_name_is_saved = saved_in_blocks.get(name, ())
@@ -110,6 +112,9 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         for names in self._need_name_var_load.values():
             for name in names:
                 blocks_where_name_is_saved = saved_in_blocks.get(name, ())
+                store_count = name_store_count.get(name, 0)
+                if store_count == 1 and blocks_where_name_is_saved == {""}:
+                    continue  # not needed
                 for block_label in blocks_where_name_is_saved:
                     s = self._need_name_var_save.setdefault(block_label, set())
                     s.add(name)
@@ -739,7 +744,7 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
             # load it. Thereafter we won't need to load it again (in this block).
             current_label = self._current_branch["label"]
             names_that_need_load = self._need_name_var_load.get(current_label, set())
-            if name in names_that_need_load:
+            if name in names_that_need_load and name in self._name_variables:
                 ob = self._name_variables[name].resolve_load(self)
                 self._name_ids[name] = ob
                 names_that_need_load.discard(name)
@@ -789,41 +794,10 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         index = self._stack.pop()
         container = self._stack.pop()
 
-        # Get type of object and index
-        element_type = container.type.subtype
-        # assert index.type is int
-
         if isinstance(container, VariableAccessId):
-            result_id = container.index(index)
-
+            result_id = container.index(index)  # result is also a VariableAccessId
         elif issubclass(container.type, _types.Array):
-
-            # todo: maybe ... the variable should be created only once ...
-            # ... instead of every time it gets indexed
-            # Put the array into a variable
-            var_access = self.obtain_variable(container.type, cc.StorageClass_Function)
-            container_variable = var_access.variable
-            var_access.resolve_store(self, container.id)
-
-            # Prepare result id and type
-            result_id, result_type_id = self.obtain_value(element_type)
-
-            # Create pointer into the array
-            pointer1 = self.obtain_id("pointer")
-            pointer2 = self.obtain_id("pointer")
-            self.gen_instruction(
-                "types",
-                cc.OpTypePointer,
-                pointer1,
-                cc.StorageClass_Function,
-                result_type_id,
-            )
-            self.gen_func_instruction(
-                cc.OpInBoundsAccessChain, pointer1, pointer2, container_variable, index
-            )
-
-            # Load the element from the array
-            self.gen_func_instruction(cc.OpLoad, result_type_id, result_id, pointer2)
+            raise RuntimeError("Array shoud be VariableAccessId")  # pragma: no cover
         else:
             raise ShaderError("Can only index from Arrays")
 
@@ -1149,6 +1123,8 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         # Sort the names to obtain consistent bytecode.
         for name in sorted(self._need_name_var_save.get(label, ())):
             ob = self._name_ids[name]  # Get the last value
+            if isinstance(ob, VariableAccessId):
+                continue  # already a variable
             if name not in self._name_variables:
                 self._name_variables[name] = self.obtain_variable(
                     ob.type, cc.StorageClass_Function, name
@@ -1542,8 +1518,10 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
 
         n, t = vector_type.length, vector_type.subtype  # noqa
         composite_ids = []
+        composite_length = 0
 
         # Deconstruct
+        can_be_constant = True
         for arg in args:
             if not isinstance(arg, ValueId):
                 raise RuntimeError("Expected a SpirV object")
@@ -1551,38 +1529,60 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
                 comp_id = arg
                 if arg.type is not t:
                     comp_id = self._convert_scalar(t, arg)
+                    can_be_constant = False
                 composite_ids.append(comp_id)
+                composite_length += 1
             elif issubclass(arg.type, _types.Vector):
-                # todo: a contiguous subset of the scalars consumed can be represented by a vector operand instead!
-                # -> I think this means we can simply do composite_ids.append(arg)
-                for i in range(arg.type.length):
-                    comp_id, comp_type_id = self.obtain_value(arg.type.subtype)
-                    self.gen_func_instruction(
-                        cc.OpCompositeExtract, comp_type_id, comp_id, arg, i
-                    )
-                    if arg.type.subtype is not t:
+                if arg.type.subtype is t:
+                    # We can just include the vectors
+                    composite_ids.append(arg)
+                    composite_length += arg.type.length
+                else:
+                    # Otherwise do the long approach
+                    can_be_constant = False  # because of func instruction
+                    for i in range(arg.type.length):
+                        comp_id, comp_type_id = self.obtain_value(arg.type.subtype)
+                        self.gen_func_instruction(
+                            cc.OpCompositeExtract, comp_type_id, comp_id, arg, i
+                        )
                         comp_id = self._convert_scalar(t, comp_id)
-                    composite_ids.append(comp_id)
+                        composite_ids.append(comp_id)
+                        composite_length += 1
             else:
                 raise ShaderError(f"Invalid type to compose vector: {arg.type}")
 
         # Check the length
-        if len(composite_ids) != n:
+        if composite_length != n:
             raise ShaderError(
                 f"{vector_type} did not expect {len(composite_ids)} elements"
             )
 
         assert (
-            len(composite_ids) >= 2
+            composite_length >= 2
         ), "When constructing a vector, there must be at least two Constituent operands."
 
         # Construct
-        result_id, vector_type_id = self.obtain_value(vector_type)
-        self.gen_func_instruction(
-            cc.OpCompositeConstruct, vector_type_id, result_id, *composite_ids
-        )
-        # todo: or OpConstantComposite
-        return result_id
+        if can_be_constant and all(arg in self._constants.values() for arg in args):
+            # Construct or re-use constant
+            key = (vector_type.__name__,) + tuple(f"%{arg.id}" for arg in args)
+            if key not in self._constants:
+                result_id, vector_type_id = self.obtain_value(vector_type)
+                self.gen_instruction(
+                    "types",
+                    cc.OpConstantComposite,
+                    vector_type_id,
+                    result_id,
+                    *composite_ids,
+                )
+                self._constants[key] = result_id
+            return self._constants[key]
+        else:
+            # Construct in function
+            result_id, vector_type_id = self.obtain_value(vector_type)
+            self.gen_func_instruction(
+                cc.OpCompositeConstruct, vector_type_id, result_id, *composite_ids
+            )
+            return result_id
 
     def _array_packing(self, args):
         n = len(args)
@@ -1598,10 +1598,25 @@ class Bytecode2SpirVGenerator(OpCodeDefinitions, BaseSpirVGenerator):
         # Create array class
         array_type = _types.Array(n, element_type)
 
-        result_id, type_id = self.obtain_value(array_type)
-        self.gen_func_instruction(
-            cc.OpCompositeConstruct, type_id, result_id, *composite_ids
-        )
-        # todo: or OpConstantComposite
+        if all(arg in self._constants.values() for arg in args):
+            # Construct or re-use constant
+            key = (array_type.__name__,) + tuple(f"%{arg.id}" for arg in args)
+            if key not in self._constants:
+                var_id, type_id = self.obtain_value(array_type)
+                self.gen_instruction(
+                    "types", cc.OpConstantComposite, type_id, var_id, *composite_ids
+                )
+                self._constants[key] = var_id
+            var_id = self._constants[key]
+        else:
+            # Construct the array *now*
+            var_id, type_id = self.obtain_value(array_type)
+            self.gen_func_instruction(
+                cc.OpCompositeConstruct, type_id, var_id, *composite_ids
+            )
 
-        return result_id
+        # Return as a variable access object
+        # This is a mutable copy of the (potentially) constant data
+        var_access = self.obtain_variable(array_type, cc.StorageClass_Function)
+        var_access.resolve_store(self, var_id)
+        return var_access
