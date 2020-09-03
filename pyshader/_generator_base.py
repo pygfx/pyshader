@@ -75,10 +75,18 @@ class ValueId(AnyId):
         super().__init__(name=name)
         self.type = type
 
+    def clone(self, name=""):
+        assert self.id is not None
+        x = ValueId(self.type, name)
+        x.id = self.id
+        return x
+
 
 class VariableAccessId(ValueId):
     """A chain of access into a SpirV variable. The type arg is the type
-    for the eventual value.
+    for the eventual value. This is a subclass of ValueId because it can usually
+    be used in place of one. However, it's only a wrapper class, and it's id
+    is always None.
     """
 
     def __init__(self, variable, storage_class, type, *indices, name=""):
@@ -86,6 +94,14 @@ class VariableAccessId(ValueId):
         self.variable = variable  # ValueId representing the SpirV Variable
         self.storage_class = storage_class
         self.indices = indices  # ValueId's
+        # self.id -> not used
+
+    def clone(self, name=""):
+        assert self.variable.id is not None
+        x = VariableAccessId(
+            self.variable, self.storage_class, self.type, *self.indices, name=name
+        )
+        return x
 
     def index(self, index, field=None):
         """Index into the variable chain, so we go one level deeper."""
@@ -94,21 +110,33 @@ class VariableAccessId(ValueId):
         indices = list(self.indices) + [index]
         if issubclass(self.type, _types.Struct):
             assert isinstance(field, int)
+            name = f"{self.name}.{self.type.keys[field]}" if self.name else ""
             return VariableAccessId(
                 self.variable,
                 self.storage_class,
                 self.type.get_subtype(field),
                 *indices,
+                name=name,
             )
         elif issubclass(self.type, _types.Array):
             assert field is None
+            name = f"{self.name}[{index.name or '..'}]" if self.name else ""
             return VariableAccessId(
-                self.variable, self.storage_class, self.type.subtype, *indices
+                self.variable,
+                self.storage_class,
+                self.type.subtype,
+                *indices,
+                name=name,
             )
         elif issubclass(self.type, _types.Vector):
             assert field is None
+            name = f"{self.name}[{index.name or '..'}]" if self.name else ""
             return VariableAccessId(
-                self.variable, self.storage_class, self.type.subtype, *indices
+                self.variable,
+                self.storage_class,
+                self.type.subtype,
+                *indices,
+                name=name,
             )
         else:
             raise ShaderError(f"VariableAccessId cannot index into {self.type}")
@@ -119,7 +147,7 @@ class VariableAccessId(ValueId):
             return self.variable
         else:
             result_type_id = gen.obtain_type_id(self.type)
-            pointer_id = gen.obtain_id("pointer")
+            pointer_id = gen.obtain_id()
             gen.gen_instruction(
                 "types",
                 cc.OpTypePointer,
@@ -127,7 +155,7 @@ class VariableAccessId(ValueId):
                 self.storage_class,
                 result_type_id,
             )
-            result_id = gen.obtain_id("access-chain-result")
+            result_id = gen.obtain_id()
             gen.gen_func_instruction(
                 cc.OpAccessChain, pointer_id, result_id, self.variable, *self.indices
             )
@@ -136,7 +164,7 @@ class VariableAccessId(ValueId):
     def resolve_load(self, gen):
         """Generate OpAccessChain instruction followed by OpLoad and return result id."""
         temp_id = self.resolve_chain(gen)
-        id, type_id = gen.obtain_value(self.type)
+        id, type_id = gen.obtain_value(self.type, self.name)
         gen.gen_func_instruction(cc.OpLoad, type_id, id, temp_id)
         return id
 
@@ -404,16 +432,17 @@ class BaseSpirVGenerator:
     # %% Utils for subclasses
 
     def gen_instruction(self, section_name, opcode, *words):
-        words = [
-            word.resolve(self) if isinstance(word, AnyId) else word for word in words
-        ]
-        self._sections[section_name].append((opcode, *words))
+        # Resolve all args for this instruction
+        words_resolved = []
+        for word in words:
+            if isinstance(word, AnyId):
+                word = word.resolve(self)
+            words_resolved.append(word)
+        # Store
+        self._sections[section_name].append((opcode, *words_resolved))
 
     def gen_func_instruction(self, opcode, *words):
-        words = [
-            word.resolve(self) if isinstance(word, AnyId) else word for word in words
-        ]
-        self._sections["functions"].append((opcode, *words))
+        self.gen_instruction("functions", opcode, *words)
 
     def obtain_id(self, name=""):
         """Get a new raw id for anything that's not a value or type."""
@@ -422,7 +451,7 @@ class BaseSpirVGenerator:
     def obtain_value(self, the_type, name=""):
         """Create id for a new value. Returns (value_id, type_id)."""
         type_id = self.obtain_type_id(the_type)
-        value_id = ValueId(the_type)
+        value_id = ValueId(the_type, name)
         return value_id, type_id
         # todo: return only value, and support value.type_id?
 
@@ -449,12 +478,14 @@ class BaseSpirVGenerator:
         # Make sure that we have it
         key = the_type.__name__, value
         if key not in self._constants:
-            id, type_id = self.obtain_value(the_type)
+            name = repr(value).lower()
+            id, type_id = self.obtain_value(the_type, name)
             if the_type is _types.boolean:
                 opcode = cc.OpConstantTrue if value else cc.OpConstantFalse
                 self.gen_instruction("types", opcode, type_id, id)
             else:
                 self.gen_instruction("types", cc.OpConstant, type_id, id, bb)
+            self.gen_instruction("debug", cc.OpName, id.id, name)
             self._constants[key] = id
         # Return cached
         return self._constants[key]
@@ -466,7 +497,7 @@ class BaseSpirVGenerator:
         # Create id and type_id
         var_id, var_type_id = self.obtain_value(the_type, name)
         #  Create pointer for variable
-        var_pointer_id = self.obtain_id("pointer")
+        var_pointer_id = self.obtain_id()
         self.gen_instruction(
             "types", cc.OpTypePointer, var_pointer_id, storage_class, var_type_id
         )
@@ -477,6 +508,9 @@ class BaseSpirVGenerator:
         self.gen_instruction(
             where, cc.OpVariable, var_pointer_id, var_id, storage_class
         )
+        # Mark the name of this variable
+        if name:
+            self.gen_instruction("debug", cc.OpName, var_id.id, name)
         # Return object that can be used to access the variable with multi-level indexing
         return VariableAccessId(var_id, storage_class, the_type, name=name)
 
