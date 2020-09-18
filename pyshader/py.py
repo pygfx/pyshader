@@ -110,6 +110,9 @@ class PyBytecode2Bytecode:
         # and cannot be resolved if block is empty
         self._protected_labels = set()
 
+        # Code can insert instructions right before a certain target is handled
+        self._insert_at = {}  # int -> [instructions]
+
         # Bytecode is a stack machine.
         self._stack = []
 
@@ -179,6 +182,12 @@ class PyBytecode2Bytecode:
         self.emit(op.co_func_end)
 
     def _stack_pop(self, allow_global=False):
+        if not self._stack:
+            # Hacky fix for 3.8. Python normally does not have values
+            # on the stack between jumps, but 3.8 can in certain
+            # scenarios. I'm pretty sure that these scenarios are out
+            # of scope of PyShader anyway.
+            return
         ob = self._stack.pop()
         if not allow_global:
             if isinstance(ob, str) and ob.startswith("."):
@@ -235,6 +244,8 @@ class PyBytecode2Bytecode:
                 ):
                     self.emit(op.co_branch, label)
                 self.emit(op.co_label, label)
+            for instruction in self._insert_at.get(self._pointer, []):
+                self.emit(*instruction)
             opname, arg = self._next()
             method_name = "_op_" + opname.lower()
             method = getattr(self, method_name, None)
@@ -1077,7 +1088,7 @@ class PyBytecode2Bytecode:
                 self._opcodes.pop(-1)
             if self._peek() == "JUMP_ABSOLUTE":
                 # Python sometimes includes a bytecode that is never touched to jump
-                # to the beginneing of the loop. Detect and ignore.
+                # to the beginning of the loop. Detect and ignore.
                 if self._peek(self._pointer + 1) == self._loop_stack[-1]["start"]:
                     self._next()  # skip it
         self.emit(op.co_branch, label)
@@ -1111,31 +1122,22 @@ class PyBytecode2Bytecode:
         )
 
     def _op_jump_if_true_or_pop(self, target):
-        # This is xx OR yy, but only when a result is needed
-        # So not inside ``if xx or yy:``, but in ``if bool(xx or yy):``
+        # This is ``xx OR yy``, in some cases. Usually not in ``if xx or yy:``,
+        # but more commonly in e.g. ``zz = xx OR yy`` or in ``if (xx or yy):``
+        # In this case we can actually convert to a logical or (hooray!),
+        # which seems to mean that users can enforce using logical and/or
+        # by enclosing the condition of an if-statement in brackets.
 
         # The xx is now on the stack. In the next instructions yy will be
         # pushed on the stack, and at target, we continue. That's where we
         # need to insert the OR.
-
-        # self._insert_at[target] = ("co_binary_op", "or")
-
-        # ... except that determining if an arbitrary object is true
-        # or false is not trivial. We could add something like co_bool,
-        # but maybe we should avoid that temptation, as it does not fit
-        # a strongly typed language well ...
-        raise ShaderError(
-            self.errinfo()
-            + "Implicit bool conversions not supported. Maybe use ``x if y else z``?"
-        )
+        self._stack_pop()
+        self._insert_at.setdefault(target, []).append(("co_binary_op", "or"))
 
     def _op_jump_if_false_or_pop(self, target):
         # Same as _op_jump_if_true_or_pop, but for AND
-        # self._insert_at[target] = ("co_binary_op", "and")
-        raise ShaderError(
-            self.errinfo()
-            + "Implicit bool conversions not supported. Maybe use ``x if y else z``?"
-        )
+        self._stack_pop()
+        self._insert_at.setdefault(target, []).append(("co_binary_op", "and"))
 
     def _start_loop(self, loop_info):
 
@@ -1255,9 +1257,12 @@ class PyBytecode2Bytecode:
         # Python < 3.8
         self.emit(op.co_branch, self._loop_stack[-1]["merge_label"])
         # Python sometimes includes a bytecode that is never touched to jump
-        # to the beginneing of the loop. Detect and ignore.
+        # to the beginning of the loop (direct or indirectly). Detect and ignore.
         if self._peek() == "JUMP_ABSOLUTE":
-            if self._peek(self._pointer + 1) == self._loop_stack[-1]["start"]:
+            target = self._peek(self._pointer + 1)
+            while self._peek(target) == "JUMP_ABSOLUTE":
+                target = self._peek(target + 1)
+            if target == self._loop_stack[-1]["start"]:
                 self._next()  # skip it
 
     def _op_continue_loop(self, target):

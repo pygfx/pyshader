@@ -3,7 +3,7 @@ Tests that run a compute shader and validate the outcome.
 With this we can validate arithmetic, control flow etc.
 """
 
-
+import sys
 import ctypes
 
 import pyshader
@@ -23,6 +23,43 @@ def generate_list_of_floats_from_shader(n, compute_shader):
     out_arrays = {1: ctypes.c_float * n}
     out = compute_with_buffers(inp_arrays, out_arrays, compute_shader)
     return list(out[1])
+
+
+# %% logic
+
+
+def test_logic1():
+    # Simple
+    @python2shader_and_validate
+    def compute_shader(
+        index_xyz: ("input", "GlobalInvocationId", ivec3),
+        data2: ("buffer", 1, Array(f32)),
+    ):
+        index = index_xyz.x
+        a = 4
+        b = 5
+        if index == 1:
+            data2[index] = f32(a == 4 and b == 5)
+        elif index == 2:
+            data2[index] = f32(a == 1 and b == 5)
+        elif index == 3:
+            data2[index] = f32(a == 4 and b == 1)
+        elif index == 4:
+            data2[index] = f32(a == 4 or b == 1)
+        elif index == 5:
+            data2[index] = f32(a == 1 or b == 5)
+        elif index == 6:
+            data2[index] = f32(a == 1 or b == 1)
+        if index == 7:
+            data2[index] = f32(a == 1 or a == 4 or a == 5)
+        if index == 8:
+            data2[index] = f32(a == 1 and a == 4 and b == 5)
+        if index == 9:
+            data2[index] = f32(a == 1 or a == 4 and b == 5)
+
+    skip_if_no_wgpu()
+    res = generate_list_of_floats_from_shader(10, compute_shader)
+    assert res == [0, 1, 0, 0, 1, 1, 0, 1, 0, 0]
 
 
 # %% if
@@ -233,7 +270,7 @@ def test_andor1():
         data2[index] = val
 
     with pytest.raises(pyshader.ShaderError):
-        pyshader.python2shader(compute_shader)
+        pyshader.python2shader(compute_shader).to_spirv()
 
 
 def test_andor2():
@@ -544,6 +581,53 @@ def test_loop8():
     assert res == [0, 0, 0, 0, 1, 1, 2, 2, 3, 3]
 
 
+def test_loop9():
+    # This is a very specific shader (volumeslice from pygfx) that produces
+    # wrong results at some point, which was the notch needed to implement
+    # variables using VarAccessId objects. See #56.
+    def compute_shader(
+        index_xyz: ("input", "GlobalInvocationId", ivec3),
+        data2: ("buffer", 1, Array(f32)),
+    ):
+        ed2pl = [[0, 4], [0, 3], [0, 5], [0, 2], [1, 5], [1, 3], [1, 4], [1, 2]]
+        intersect_flag = [0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0]
+        i = 1
+        plane_index = ed2pl[i][0]
+        vertices = [i, 0, 0, 0, 0, 0]
+        i_start = i
+        i_last = i
+        max_iter = 6
+        for iter in range(1, max_iter):
+            for i in range(12):
+                if i != i_last and intersect_flag[i] == 1:
+                    if ed2pl[i][0] == plane_index:
+                        vertices[iter] = i
+                        plane_index = ed2pl[i][1]
+                        i_last = i
+                        break
+                    elif ed2pl[i][1] == plane_index:
+                        vertices[iter] = i
+                        plane_index = ed2pl[i][0]
+                        i_last = i
+                        break
+            if i_last == i_start:
+                max_iter = iter
+                break
+        index = index_xyz.x
+        data2[index] = f32(vertices[index])
+
+    # On py36 this works, but generates different bytecode ...
+    if sys.version_info > (3, 7):
+        compute_shader = python2shader_and_validate(compute_shader)
+    else:
+        compute_shader = pyshader.python2shader(compute_shader)
+
+    skip_if_no_wgpu()
+    vertices = generate_list_of_floats_from_shader(6, compute_shader)
+    print(vertices)
+    assert vertices == [1, 3, 7, 5, 1, 0]
+
+
 def test_while1():
     # A simple while loop!
 
@@ -828,39 +912,41 @@ def skip_if_no_wgpu():
 
 
 HASHES = {
-    "test_if1.compute_shader": ("44cc15f3c229ee9d", "6256215f8d9ccb23"),
-    "test_if2.compute_shader": ("86d2f7c7a4c935c9", "55f780c3c6c59ec3"),
-    "test_if3.compute_shader": ("1c609db87eca2be8", "2bc27200e964ede7"),
-    "test_if4.compute_shader": ("7060b1753954d22c", "31ac27d5a38800f3"),
-    "test_if5.compute_shader": ("6a3ea81e2cd64956", "a735d1f259814aa9"),
-    "test_ternary1.compute_shader": ("156d28e5c4be6937", "0ab286c7d220bdc7"),
-    "test_ternary2.compute_shader": ("d67ec1d6cd093ed4", "f138100b4be5ac2e"),
-    "test_ternary3.compute_shader": ("294814555a495b47", "855af04878683ce4"),
-    "test_andor2.compute_shader": ("bb12e8e8d9b084b8", "518dd4992e18d340"),
-    "test_andor3.compute_shader": ("0fd3a5e9e644355f", "68aa6a5f6eb6d0ff"),
-    "test_andor4.compute_shader": ("ec64940aa329c636", "c46c45dfcf8fddf9"),
-    "test_andor5.compute_shader": ("e277b50c2abacd77", "e2a3a4579cb9afe8"),
-    "test_loop0.compute_shader": ("7040fa4ca4f315d6", "505071c8e78b33b3"),
-    "test_loop0b.compute_shader": ("686a4296cbe258f0", "446030f2699e9376"),
-    "test_loop1.compute_shader": ("35952fcf52dd20f0", "3740a8d543e6fdc0"),
-    "test_loop2.compute_shader": ("ff995fa6c94115a2", "37058be489468bf2"),
-    "test_loop3.compute_shader": ("805d244ecbec89a3", "65bf4899670b0a41"),
-    "test_loop4.compute_shader": ("7d5d1636c3089f12", "53820e95d7bfbf50"),
-    "test_loop5a.compute_shader": ("e440f9ea91fe58b0", "074b7ea8ed2ea331"),
-    "test_loop5b.compute_shader": ("883e27baae98bc79", "b2b364eda9fff35a"),
-    "test_loop6.compute_shader": ("0b3ab9bf77604e59", "73deedeec72288e4"),
-    "test_loop7.compute_shader": ("40e2d0c552374106", "d9f7ec6e73ae4647"),
-    "test_loop8.compute_shader": ("1a738fac4a40cba8", "cf10f755ffbd5cef"),
-    "test_while1.compute_shader": ("a2f299b8d41c44ec", "95f872416a208e0f"),
-    "test_while2a.compute_shader": ("da2e0f8b5f774aaa", "d04a277e9a4e10f7"),
-    "test_while2b.compute_shader": ("e62ae12b9c5d511b", "cd9e8c9cb5d94d16"),
-    "test_while2c.compute_shader": ("af3144327a1feedb", "06b82657f222b40f"),
-    "test_while3.compute_shader": ("c21d6893f2bf240f", "7a3fbee64999c13c"),
-    "test_while4.compute_shader": ("aff8b8bea6131cdf", "1c19a0f2674b4447"),
-    "test_while5.compute_shader": ("6ee5853ff8c9085f", "8734358070b61094"),
-    "test_while6.compute_shader": ("dbf187d5ab4ff2f6", "3789e7ece59dfd52"),
-    "test_discard.fragment_shader": ("bbdaa8848a180860", "dc2fc4e245787e40"),
-    "test_long_bytecode.compute_shader": ("c0a43e86e3c7c35e", "05a51c27d830eba3"),
+    "test_logic1.compute_shader": ("6f2baacab270044c", "b0ff1221b610cd07"),
+    "test_if1.compute_shader": ("44cc15f3c229ee9d", "24e742b065891a5f"),
+    "test_if2.compute_shader": ("86d2f7c7a4c935c9", "1b8bdd178b440afc"),
+    "test_if3.compute_shader": ("1c609db87eca2be8", "a1fd71cfc4368f5a"),
+    "test_if4.compute_shader": ("7060b1753954d22c", "4c015cae278e707f"),
+    "test_if5.compute_shader": ("6a3ea81e2cd64956", "c02b185d485d39d2"),
+    "test_ternary1.compute_shader": ("156d28e5c4be6937", "7bebe09b5b2088d5"),
+    "test_ternary2.compute_shader": ("d67ec1d6cd093ed4", "3ba38069a6266a05"),
+    "test_ternary3.compute_shader": ("294814555a495b47", "d56fe95b099484d2"),
+    "test_andor2.compute_shader": ("bb12e8e8d9b084b8", "24ced37f90452a68"),
+    "test_andor3.compute_shader": ("0fd3a5e9e644355f", "72dc80fe74578c29"),
+    "test_andor4.compute_shader": ("ec64940aa329c636", "6aec65f6ad6c54d2"),
+    "test_andor5.compute_shader": ("e277b50c2abacd77", "286e1ee10fac74e7"),
+    "test_loop0.compute_shader": ("7040fa4ca4f315d6", "9d0ff26c69754d35"),
+    "test_loop0b.compute_shader": ("686a4296cbe258f0", "e2a9b4d8ae811434"),
+    "test_loop1.compute_shader": ("35952fcf52dd20f0", "d8f126fe99689e42"),
+    "test_loop2.compute_shader": ("ff995fa6c94115a2", "5c72a5834df3c1a4"),
+    "test_loop3.compute_shader": ("805d244ecbec89a3", "ad279b0ef49f56df"),
+    "test_loop4.compute_shader": ("7d5d1636c3089f12", "11a1d7b1ec854922"),
+    "test_loop5a.compute_shader": ("e440f9ea91fe58b0", "7eeb59d940689c3c"),
+    "test_loop5b.compute_shader": ("883e27baae98bc79", "378ba47c132c144d"),
+    "test_loop6.compute_shader": ("0b3ab9bf77604e59", "34d9ada433252cbe"),
+    "test_loop7.compute_shader": ("40e2d0c552374106", "cd216d288add13d3"),
+    "test_loop8.compute_shader": ("1a738fac4a40cba8", "83dd5400229a0de9"),
+    "test_loop9.compute_shader": ("90ecec7524972f4f", "5486ecea18245356"),
+    "test_while1.compute_shader": ("a2f299b8d41c44ec", "4e515c12f8f623f3"),
+    "test_while2a.compute_shader": ("da2e0f8b5f774aaa", "22a6d5dd9cb9ee86"),
+    "test_while2b.compute_shader": ("e62ae12b9c5d511b", "e4c2d3f2a9e5578f"),
+    "test_while2c.compute_shader": ("af3144327a1feedb", "6313ec46d193953f"),
+    "test_while3.compute_shader": ("c21d6893f2bf240f", "dd2c888c2afaf011"),
+    "test_while4.compute_shader": ("aff8b8bea6131cdf", "3fafc59ab6edec77"),
+    "test_while5.compute_shader": ("6ee5853ff8c9085f", "a57df8d3930f2aaa"),
+    "test_while6.compute_shader": ("dbf187d5ab4ff2f6", "ca7a45545785bdbb"),
+    "test_discard.fragment_shader": ("bbdaa8848a180860", "9f5a7f4461e60eaf"),
+    "test_long_bytecode.compute_shader": ("c0a43e86e3c7c35e", "5fb041f85d83b939"),
 }
 
 

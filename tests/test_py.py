@@ -89,12 +89,14 @@ def test_spirv_output_opnames():
     text = pyshader.dev.disassemble(m.to_spirv())
 
     # Check opname
-    assert text.count("OpName") in (5, 6)
+    assert text.count("OpName") == 9
     assert 'OpName %main "main"' in text
     assert 'OpName %index "index"' in text
     assert 'OpName %data1 "data1"' in text
     assert 'OpName %1 "1"' in text
     assert 'OpName %2 "2"' in text
+    assert 'OpName %a "a"' in text
+    assert 'OpName %b "b"' in text
 
 
 @mark.skipif(not can_use_vulkan_sdk, reason="No Vulkan SDK")
@@ -186,11 +188,31 @@ def test_texcomp_2d_rg32i():
         tex.write(index.xy, color)
 
 
-def test_tuple_unpacking():
+def test_tuple_unpacking1():
+    @python2shader_and_validate_nochecks
+    def compute_shader(
+        index: ("input", "GlobalInvocationId", ivec3),
+        data2: ("buffer", 1, "Array(vec2)"),
+    ):
+        i = f32(index.x)
+        a, b = 1.0, 2.0  # Cover Python storing this as a tuple const
+        c, d = a + i, b + 1.0
+        data2[index.x] = vec2(c, d)
+
+    skip_if_no_wgpu()
+
+    out_arrays = {1: ctypes.c_float * 20}
+    out = compute_with_buffers({}, out_arrays, compute_shader, n=10)
+    res = list(out[1])
+    assert res[0::2] == [i + 1 for i in range(10)]
+    assert res[1::2] == [3 for i in range(10)]
+
+
+def test_tuple_unpacking2():
     # Python implementations deal with tuple packing/unpacking differently.
     # Python 3.8+ has rot_four, pypy3 resolves by changing the order of the
     # store ops in the bytecode itself, and seems to even ditch unused variables.
-    @python2shader_and_validate_nobc
+    @python2shader_and_validate_nochecks
     def compute_shader(
         index: ("input", "GlobalInvocationId", ivec3),
         data2: ("buffer", 1, "Array(vec2)"),
@@ -386,10 +408,10 @@ def python2shader_and_validate(func):
     return m
 
 
-def python2shader_and_validate_nobc(func):
+def python2shader_and_validate_nochecks(func):
     m = pyshader.python2shader(func)
     assert m.input is func
-    validate_module(m, HASHES, check_bytecode=False)
+    validate_module(m, HASHES, check_bytecode=False, check_spirv=False)
     return m
 
 
@@ -400,14 +422,15 @@ def skip_if_no_wgpu():
 
 HASHES = {
     "test_null_shader.vertex_shader": ("bc099a07b86d70f2", "171625fefed67e8c"),
-    "test_triangle_shader.vertex_shader": ("000514d8367ef0fa", "25c7995a78d88149"),
+    "test_triangle_shader.vertex_shader": ("000514d8367ef0fa", "493e3fd60162cd89"),
     "test_triangle_shader.fragment_shader": ("6da8c966525c9c7f", "6195678be1133cd3"),
     "test_compute_shader.compute_shader": ("7cf577981390626b", "c7570b16d25a33d0"),
     "test_texture_2d_f32.fragment_shader": ("564804a234e76fe1", "3e453a2a6d4bae82"),
     "test_texture_1d_i32.fragment_shader": ("0c1ad1a8f909c442", "ceb99eb55f125a0c"),
     "test_texture_3d_r16i.fragment_shader": ("f1069cfd9c74fa1d", "7cb52e6be0b25f4d"),
-    "test_texcomp_2d_rg32i.compute_shader": ("7dbaa7fe613cf33d", "8683b939108878c6"),
-    "test_tuple_unpacking.compute_shader": ("d48f10f99c448f65", "c893e0ad65342ac4"),
+    "test_texcomp_2d_rg32i.compute_shader": ("7dbaa7fe613cf33d", "cf02cb3547233376"),
+    "test_tuple_unpacking1.compute_shader": ("4acf3182e7c46b8a", "fdc69975466875fd"),
+    "test_tuple_unpacking2.compute_shader": ("d48f10f99c448f65", "1f3f3757e3356b21"),
 }
 
 # Run this as a script to get new hashes when needed
