@@ -4,7 +4,7 @@ Write modern GPU shaders in Python!
 
 # flake8: noqa
 
-__version__ = "0.6.3"
+__version__ = "0.7.0"
 version_info = tuple(map(int, __version__.split(".")))
 
 from ._coreutils import ShaderError
